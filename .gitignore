@@ -1,5 +1,4 @@
 .benchmarks
-.vscode/
 .data
 */**/__pycache__
 */**/*.pyc
@@ -18,4 +17,3 @@ labels.json
 results.txt
 checkpoints
 logs/
-scripts/scribe.py

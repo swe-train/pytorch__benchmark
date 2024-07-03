@@ -18,14 +18,11 @@ from torchbenchmark.tasks import COMPUTER_VISION
 from .train_cyclegan import prepare_training_loop
 from .test_cyclegan import get_model
 
-
 def nyi():
     raise NotImplementedError()
 
-
 class Model(BenchmarkModel):
     task = COMPUTER_VISION.GENERATION
-
     def __init__(self, device=None, jit=False):
         super().__init__()
         self.device = device
@@ -55,6 +52,7 @@ class Model(BenchmarkModel):
             raise NotImplementedError("Disabled due to excessively slow runtime - see GH Issue #100")
 
         return self.training_loop(niterations)
+
 
     def eval(self, niterations=1):
         model, example_inputs = self.get_module()
