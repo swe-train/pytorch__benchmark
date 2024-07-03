@@ -9,11 +9,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-
-def print(*args):
-    pass  # do nothing
-
-
 def init_seeds(seed=0):
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -32,10 +27,22 @@ def select_device(device='', apex=False, batch_size=None):
 
     cuda = False if cpu_request else torch.cuda.is_available()
     if cuda:
-        return torch.device(f"cuda:{torch.cuda.current_device()}")
+        c = 1024 ** 2  # bytes to MB
+        ng = torch.cuda.device_count()
+        if ng > 1 and batch_size:  # check that batch_size is compatible with device_count
+            assert batch_size % ng == 0, 'batch-size %g not multiple of GPU count %g' % (batch_size, ng)
+        x = [torch.cuda.get_device_properties(i) for i in range(ng)]
+        s = 'Using CUDA ' + ('Apex ' if apex else '')  # apex for mixed precision https://github.com/NVIDIA/apex
+        for i in range(0, ng):
+            if i == 1:
+                s = ' ' * len(s)
+            print("%sdevice%g _CudaDeviceProperties(name='%s', total_memory=%dMB)" %
+                  (s, i, x[i].name, x[i].total_memory / c))
+    else:
+        print('Using CPU')
 
-    print('Using CPU')
-    return torch.device('cpu')
+    print('')  # skip a line
+    return torch.device('cuda:0' if cuda else 'cpu')
 
 
 def time_synchronized():

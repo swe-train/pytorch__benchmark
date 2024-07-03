@@ -7,14 +7,16 @@ import pathlib
 import json
 import random
 
-TRAIN_NUM_BATCH = 1
-EVAL_NUM_BATCH = 1
+# Use the train batch size from the original CMRC2018 Q&A task
+# Source: https://fastnlp.readthedocs.io/zh/latest/tutorials/extend_1_bert_embedding.html
+TRAIN_BATCH_SIZE = 6
+EVAL_BATCH_SIZE = 1
 
 CMRC2018_TRAIN_SPEC = {
     # Original
     # "data_size": 2403,
     # Benchmark
-    "data_size": 6, # placeholder, will be replaced by the true batch size
+    "data_size": TRAIN_BATCH_SIZE,
     "title_length": 5,
     "paragraph_size": 1,
     "context_length": 456,
@@ -27,7 +29,7 @@ CMRC2018_DEV_SPEC = {
     # Original
     # "data_size": 848,
     # Benchmark
-    "data_size": 1, # placeholder, will be replaced by the true batch size
+    "data_size": EVAL_BATCH_SIZE,
     "title_length": 4,
     "paragraph_size": 1,
     "context_length": 455,
@@ -91,16 +93,14 @@ def _create_dir_if_nonexist(dirpath):
     pathlib.Path(dirpath).mkdir(parents=True, exist_ok=True)
 
 def _dump_data(data, path):
-    with open(path, "w", encoding='utf8') as dp:
+    with open(path, "w") as dp:
         json.dump(data, dp, indent=4, ensure_ascii=False)
 
-def _generate_dev(batch_size):
-    CMRC2018_DEV_SPEC["data_size"] = batch_size * EVAL_NUM_BATCH
+def _generate_dev():
     dev_data = _generate_cmrc2018(CMRC2018_DEV_SPEC)
     _dump_data(dev_data, CMRC2018_DEV_SIM)
 
-def _generate_train(batch_size):
-    CMRC2018_TRAIN_SPEC["data_size"] = batch_size * TRAIN_NUM_BATCH
+def _generate_train():
     dev_data = _generate_cmrc2018(CMRC2018_TRAIN_SPEC)
     _dump_data(dev_data, CMRC2018_TRAIN_SIM)
 
@@ -127,11 +127,11 @@ def _create_empty_bin():
     with open(bin_file, "w") as bf:
         bf.write("")
 
-def generate_inputs(train_batch_size, eval_batch_size):
+def generate_inputs():
     _create_dir_if_nonexist(CMRC2018_DIR)
     _create_dir_if_nonexist(os.path.join(CMRC2018_DIR, "config"))
-    _generate_dev(eval_batch_size)
-    _generate_train(train_batch_size)
+    _generate_dev()
+    _generate_train()
     _generate_vocab()
     _create_empty_bin()
     _copy_bert_config()

@@ -9,38 +9,19 @@ import subprocess
 import sys
 import tempfile
 import threading
-from pathlib import Path
 from typing import Any, Callable, Dict, List, NoReturn, Optional, Tuple
 from urllib import request
-
-import torch
 
 from components._impl.tasks import base as base_task
 from components._impl.workers import subprocess_worker
 
-REPO_PATH = Path(os.path.abspath(__file__)).parent.parent
-DATA_PATH = os.path.join(REPO_PATH, "torchbenchmark", "data", ".data")
 
-class add_path():
-    def __init__(self, path):
-        self.path = path
-
-    def __enter__(self):
-        sys.path.insert(0, self.path)
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        try:
-            sys.path.remove(self.path)
-        except ValueError:
-            pass
-
-with add_path(str(REPO_PATH)):
-    from utils import TORCH_DEPS, get_pkg_versions, proxy_suggestion
+proxy_suggestion = "Unable to verify https connectivity, " \
+                   "required for setup.\n" \
+                   "Do you need to use a proxy?"
 
 this_dir = pathlib.Path(__file__).parent.absolute()
 model_dir = 'models'
-internal_model_dir = "fb"
-canary_model_dir = "canary_models"
 install_file = 'install.py'
 
 
@@ -53,36 +34,25 @@ def _test_https(test_url: str = 'https://github.com', timeout: float = 0.5) -> b
 
 
 def _install_deps(model_path: str, verbose: bool = True) -> Tuple[bool, Any]:
-    from .util.env_check import get_pkg_versions
     run_args = [
         [sys.executable, install_file],
     ]
-    run_env = os.environ.copy()
-    run_env["PYTHONPATH"] = this_dir.parent
     run_kwargs = {
         'cwd': model_path,
         'check': True,
-        'env': run_env,
     }
 
     output_buffer = None
     _, stdout_fpath = tempfile.mkstemp()
-
     try:
         output_buffer = io.FileIO(stdout_fpath, mode="w")
         if os.path.exists(os.path.join(model_path, install_file)):
             if not verbose:
                 run_kwargs['stderr'] = subprocess.STDOUT
                 run_kwargs['stdout'] = output_buffer
-            versions = get_pkg_versions(TORCH_DEPS)
             subprocess.run(*run_args, **run_kwargs)  # type: ignore
-            new_versions = get_pkg_versions(TORCH_DEPS)
-            if versions != new_versions:
-                errmsg = f"The torch packages are re-installed after installing the benchmark deps. \
-                           Before: {versions}, after: {new_versions}"
-                return (False, errmsg, None)
         else:
-            return (True, f"No install.py is found in {model_path}. Skip.", None)
+            return (False, f"No install.py is found in {model_path}.", None)
     except subprocess.CalledProcessError as e:
         return (False, e.output, io.FileIO(stdout_fpath, mode="r").read().decode())
     except Exception as e:
@@ -93,66 +63,22 @@ def _install_deps(model_path: str, verbose: bool = True) -> Tuple[bool, Any]:
 
     return (True, None, None)
 
-def dir_contains_file(dir, file_name) -> bool:
-    names = map(lambda x: x.name, filter(lambda x: x.is_file(), dir.iterdir()))
-    return file_name in names
 
 def _list_model_paths() -> List[str]:
     p = pathlib.Path(__file__).parent.joinpath(model_dir)
-    # Only load the model directories that contain a "__init.py__" file
-    models = sorted(str(child.absolute()) for child in p.iterdir() if child.is_dir() and \
-                        (not child.name == internal_model_dir) and dir_contains_file(child, "__init__.py"))
-    p = p.joinpath(internal_model_dir)
-    if p.exists():
-        m = sorted(str(child.absolute()) for child in p.iterdir() if child.is_dir() and dir_contains_file(child, "__init__.py"))
-        models.extend(m)
-    return models
+    return sorted(str(child.absolute()) for child in p.iterdir() if child.is_dir())
 
-def _list_canary_model_paths() -> List[str]:
-    p = pathlib.Path(__file__).parent.joinpath(canary_model_dir)
-    # Only load the model directories that contain a "__init.py__" file
-    models = sorted(str(child.absolute()) for child in p.iterdir() if child.is_dir() and \
-                        (not child.name == internal_model_dir) and dir_contains_file(child, "__init__.py"))
-    return models
 
-def _is_internal_model(model_name: str) -> bool:
-    p = pathlib.Path(__file__).parent.joinpath(model_dir).joinpath(internal_model_dir).joinpath(model_name)
-    if p.exists() and p.joinpath("__init__.py").exists():
-        return True
-    return False
-
-def _is_canary_model(model_name: str) -> bool:
-    p = pathlib.Path(__file__).parent.joinpath(canary_model_dir).joinpath(model_name)
-    if p.exists() and p.joinpath("__init__.py").exists():
-        return True
-    return False
-
-def setup(models: List[str] = [], verbose: bool = True, continue_on_fail: bool = False, test_mode: bool = False, allow_canary: bool = False) -> bool:
+def setup(verbose: bool = True, continue_on_fail: bool = False) -> bool:
     if not _test_https():
         print(proxy_suggestion)
         sys.exit(-1)
 
     failures = {}
-    models = list(map(lambda p: p.lower(), models))
-    model_paths = filter(lambda p: True if not models else os.path.basename(p).lower() in models, _list_model_paths())
-    if allow_canary:
-        canary_model_paths = filter(lambda p: os.path.basename(p).lower() in models, _list_canary_model_paths())
-        model_paths = list(model_paths)
-        model_paths.extend(canary_model_paths)
-    for model_path in model_paths:
+    for model_path in _list_model_paths():
         print(f"running setup for {model_path}...", end="", flush=True)
-        if test_mode:
-            versions = get_pkg_versions(TORCH_DEPS)
         success, errmsg, stdout_stderr = _install_deps(model_path, verbose=verbose)
-        if test_mode:
-            new_versions = get_pkg_versions(TORCH_DEPS, reload=True)
-            if versions != new_versions:
-                print(f"The torch packages are re-installed after installing the benchmark model {model_path}. \
-                        Before: {versions}, after: {new_versions}")
-                sys.exit(-1)
-        if success and errmsg and "No install.py is found" in errmsg:
-            print("SKIP - No install.py is found")
-        elif success:
+        if success:
             print("OK")
         else:
             print("FAIL")
@@ -206,6 +132,7 @@ class ModelDetails:
     """
     path: str
     exists: bool
+    optimized_for_inference: bool
     _diagnostic_msg: str
 
     metadata: Dict[str, Any]
@@ -248,13 +175,12 @@ class ModelTask(base_task.TaskBase):
         self,
         model_path: str,
         timeout: Optional[float] = None,
-        extra_env: Optional[Dict[str, str]] = None,
     ) -> None:
         gc.collect()  # Make sure previous task has a chance to release the lock
         assert self._lock.acquire(blocking=False), "Failed to acquire lock."
 
         self._model_path = model_path
-        self._worker = Worker(timeout=timeout, extra_env=extra_env)
+        self._worker = Worker(timeout=timeout)
         self.worker.run("import torch")
 
         self._details: ModelDetails = ModelDetails(
@@ -263,6 +189,9 @@ class ModelTask(base_task.TaskBase):
                 model_path=model_path,
             )
         )
+
+        if self._details._diagnostic_msg:
+            print(self._details._diagnostic_msg)
 
     def __del__(self) -> None:
         self._lock.release()
@@ -307,6 +236,7 @@ class ModelTask(base_task.TaskBase):
         return {
             "path": model_path,
             "exists": Model is not None,
+            "optimized_for_inference": hasattr(Model, "optimized_for_inference"),
             "_diagnostic_msg": diagnostic_msg,
             "metadata": {}
         }
@@ -317,9 +247,9 @@ class ModelTask(base_task.TaskBase):
 
     @base_task.run_in_worker(scoped=True)
     @staticmethod
-    def make_model_instance(test: str, device: str, jit: bool, batch_size: Optional[int]=None, extra_args: List[str]=[]) -> None:
+    def make_model_instance(device: str, jit: bool) -> None:
         Model = globals()["Model"]
-        model = Model(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
+        model = Model(device=device, jit=jit)
 
         import gc
         gc.collect()
@@ -334,43 +264,6 @@ class ModelTask(base_task.TaskBase):
             "model": model,
             "maybe_sync": maybe_sync,
         })
-
-    # =========================================================================
-    # == Replace the `invoke()` function in `model` instance ==================
-    # =========================================================================
-    @base_task.run_in_worker(scoped=True)
-    @staticmethod
-    def replace_invoke(module_name: str, func_name: str) -> None:
-        import importlib
-        # import function from pkg
-        model = globals()["model"]
-        try:
-            module = importlib.import_module(module_name)
-            inject_func = getattr(module, func_name, None)
-            if inject_func is None:
-                diagnostic_msg = f"Warning: {module} does not define attribute {func_name}, skip it"
-        except ModuleNotFoundError as e:
-            diagnostic_msg = f"Warning: Could not find dependent module {e.name} for Model {model.name}, skip it"
-        model.invoke = inject_func.__get__(model)
-
-    # =========================================================================
-    # == Get Model attribute in the child process =============================
-    # =========================================================================
-    @base_task.run_in_worker(scoped=True)
-    @staticmethod
-    def get_model_attribute(attr: str, field: str=None, classattr: bool=False) -> Any:
-        if classattr:
-            model = globals()["Model"]
-        else:
-            model = globals()["model"]
-        if hasattr(model, attr):
-            if field:
-                model_attr = getattr(model, attr)
-                return getattr(model_attr, field)
-            else:
-                return getattr(model, attr)
-        else:
-            return None
 
     def gc_collect(self) -> None:
         self.worker.run("""
@@ -392,14 +285,20 @@ class ModelTask(base_task.TaskBase):
     def set_train(self) -> None:
         self.worker.run("model.set_train()")
 
-    def invoke(self) -> None:
+    def train(self) -> None:
         self.worker.run("""
-            model.invoke()
+            model.train()
             maybe_sync()
         """)
 
     def set_eval(self) -> None:
         self.worker.run("model.set_eval()")
+
+    def eval(self) -> None:
+        self.worker.run("""
+            model.eval()
+            maybe_sync()
+        """)
 
     def extract_details_train(self) -> None:
         self._details.metadata["train_benchmark"] = self.worker.load_stmt("torch.backends.cudnn.benchmark")
@@ -438,39 +337,18 @@ class ModelTask(base_task.TaskBase):
     @staticmethod
     def check_example() -> None:
         model = globals()["model"]
-        module, example_inputs = model.get_module()
-        if isinstance(example_inputs, dict):
-            # Huggingface and GNN models pass **kwargs as arguments, not *args
-            module(**example_inputs)
-        elif isinstance(example_inputs, tuple) or isinstance(example_inputs, list):
-            module(*example_inputs)
-        else:
-            assert False, "example_inputs from model.get_module() must be dict, tuple, or list"
-        # If model implements `gen_inputs()` interface, test the first example input it generates
+
         try:
-            input_iter, _size = model.gen_inputs()
-            next_inputs = next(input_iter)
-
-            for input in next_inputs:
-                if isinstance(input, dict):
-                    # Huggingface models pass **kwargs as arguments, not *args
-                    module(**input)
-                else:
-                    module(*input)
+            module, example_inputs = model.get_module()
         except NotImplementedError:
-            # We allow models that don't implement this interface
-            pass
+            # Raise an error for models without a get_module() implementation.
+            raise RuntimeError('Missing get_module() implementation. Required for all models.')
 
-    @base_task.run_in_worker(scoped=True)
-    @staticmethod
-    def check_eval_output() -> None:
-        instance = globals()["model"]
-        assert instance.test == "eval", "We only support checking output of an eval test. Please submit a bug report."
-        out = instance.invoke()
-        # check output stableness on CUDA device
-        from torchbenchmark.util.env_check import stableness_check
-        if instance.device == "cuda":
-            stableness_check(instance, cos_sim=False, deepcopy=instance.DEEPCOPY)
+        if isinstance(example_inputs, dict):
+            # Huggingface models pass **kwargs as arguments, not *args
+            module(**example_inputs)
+        else:
+            module(*example_inputs)
 
     @base_task.run_in_worker(scoped=True)
     @staticmethod
@@ -482,7 +360,12 @@ class ModelTask(base_task.TaskBase):
         if current_device is None:
             raise RuntimeError('Missing device in BenchmarkModel.')
 
-        model, inputs = instance.get_module()
+        try:
+            model, inputs = instance.get_module()
+        except NotImplementedError:
+            # Raise an error for models without a get_module() implementation.
+            raise RuntimeError('Missing get_module() implementation. Required for all models.')
+
         model_name = getattr(model, 'name', None)
 
         # Check the model tensors are assigned to the expected device.
@@ -546,16 +429,13 @@ class ModelTask(base_task.TaskBase):
         # This context manager is used in testing to ensure we're not leaking
         # memory; these tests are generally parameterized by device, so in some
         # cases we want this (and the outer check) to simply be a no-op.
-        if skip or os.getenv('PYTORCH_TEST_SKIP_CUDA_MEM_LEAK_CHECK', '0') == '1':
+        if skip:
             yield
             return
-        if hasattr(torch._C, '_cuda_clearCublasWorkspaces'):
-            self.worker.load_stmt("torch._C._cuda_clearCublasWorkspaces()")
+
         self.gc_collect()
         memory_before = self.worker.load_stmt("torch.cuda.memory_allocated()")
         yield
-        if hasattr(torch._C, '_cuda_clearCublasWorkspaces'):
-            self.worker.load_stmt("torch._C._cuda_clearCublasWorkspaces()")
         self.gc_collect()
         assert_equal(
             memory_before,
@@ -575,9 +455,8 @@ def list_models(model_match=None):
     models = []
     for model_path in _list_model_paths():
         model_name = os.path.basename(model_path)
-        model_pkg = model_name if not _is_internal_model(model_name) else f"{internal_model_dir}.{model_name}"
         try:
-            module = importlib.import_module(f'.models.{model_pkg}', package=__name__)
+            module = importlib.import_module(f'.models.{model_name}', package=__name__)
         except ModuleNotFoundError as e:
             print(f"Warning: Could not find dependent module {e.name} for Model {model_name}, skip it")
             continue
@@ -596,42 +475,6 @@ def list_models(model_match=None):
                 models.append(Model)
     return models
 
-def load_model_by_name(model):
-    models = filter(lambda x: model.lower() == x.lower(),
-                    map(lambda y: os.path.basename(y), _list_model_paths()))
-    models = list(models)
-    if not models:
-        return None
-    assert len(models) == 1, f"Found more than one models {models} with the exact name: {model}"
-    model_name = models[0]
-    model_pkg = model_name if not _is_internal_model(model_name) else f"{internal_model_dir}.{model_name}"
-    try:
-        module = importlib.import_module(f'.models.{model_pkg}', package=__name__)
-    except ModuleNotFoundError as e:
-        print(f"Warning: Could not find dependent module {e.name} for Model {model_name}, skip it. \n {e}")
-        return None
-    Model = getattr(module, 'Model', None)
-    if Model is None:
-        print(f"Warning: {module} does not define attribute Model, skip it")
-        return None
-    if not hasattr(Model, 'name'):
-        Model.name = model_name
-    return Model
-
-def load_canary_model_by_name(model: str):
-    assert _is_canary_model(model), f"Canary model {model} is not found in the {canary_model_dir} path."
-    try:
-        module = importlib.import_module(f'.canary_models.{model}', package=__name__)
-    except ModuleNotFoundError as e:
-        print(f"Warning: Could not find dependent module {e.name} for Model {model}, skip it. \n {e}")
-        return None
-    Model = getattr(module, 'Model', None)
-    if Model is None:
-        print(f"Warning: {module} does not define attribute Model, skip it")
-        return None
-    if not hasattr(Model, 'name'):
-        Model.name = model
-    return Model
 
 def get_metadata_from_yaml(path):
     import yaml
@@ -641,8 +484,3 @@ def get_metadata_from_yaml(path):
         with open(metadata_path, 'r') as f:
             md = yaml.load(f, Loader=yaml.FullLoader)
     return md
-
-def str_to_bool(input: Any) -> bool:
-    if not input:
-        return False
-    return str(input).lower() in ("1", "yes", "y", "true", "t", "on")

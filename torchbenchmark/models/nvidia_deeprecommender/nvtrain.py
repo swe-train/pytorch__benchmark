@@ -179,15 +179,15 @@ def DoTrainEval(encoder, evaluation_data_layer, use_cuda):
 
 class DeepRecommenderTrainBenchmark:
 
-  def __init__(self, device="cpu", jit=False, batch_size=256, processCommandLine = False):
-    self.TrainInit(device, jit, batch_size, processCommandLine)
+  def __init__(self, device="cpu", jit=False, processCommandLine = False):
+    self.TrainInit(device, jit, processCommandLine)
 
 
-  def TrainInit(self, device="cpu", jit=False, batch_size=256, processCommandLine = False):
+  def TrainInit(self, device="cpu", jit=False, processCommandLine = False):
 
     # Force test to run in toy mode. Single call of fake data to model.
     self.toytest = True
-    self.toybatch = batch_size
+    self.toybatch = 256
 
     # number of movies in netflix training set.
     self.toyvocab = 197951
@@ -269,6 +269,8 @@ class DeepRecommenderTrainBenchmark:
       print('######################################################')
       print('######################################################')
 
+    if jit:
+      self.rencoder = torch.jit.trace(self.rencoder, (self.toyinputs,))
   
     if self.args.use_cuda:
       gpu_ids = [int(g) for g in self.args.gpu_ids.split(',')]
@@ -312,12 +314,6 @@ class DeepRecommenderTrainBenchmark:
     if self.args.noise_prob > 0.0:
       self.dp = nn.Dropout(p=self.args.noise_prob)
 
-  def get_optimizer(self):
-    return self.optimizer
-
-  def set_optimizer(self, optimizer):
-    self.optimizer = optimizer
-    
   def DoTrain(self):
   
     self.rencoder.train()

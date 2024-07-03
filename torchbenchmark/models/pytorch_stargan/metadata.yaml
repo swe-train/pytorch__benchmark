@@ -1,5 +1,6 @@
-eval_benchmark: true
-eval_deterministic: false
+eval_benchmark: false
+eval_deterministic: true
 eval_nograd: true
-train_benchmark: true
-train_deterministic: false
+optimized_for_inference: true
+train_benchmark: false
+train_deterministic: true

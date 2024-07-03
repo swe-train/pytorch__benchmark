@@ -266,7 +266,7 @@ def main_wo_bpe():
     Usage: python preprocess.py -lang_src de -lang_trg en -save_data multi30k_de_en.pkl -share_vocab
     '''
 
-    spacy_support_langs = ['de_core_news_sm', 'el_core_news_sm', 'en_core_web_sm', 'es_core_news_sm', 'fr_core_news_sm', 'it_core_news_sm', 'lt_core_news_sm', 'nb_core_news_sm', 'nl_core_news_sm', 'pt_core_news_sm']
+    spacy_support_langs = ['de', 'el', 'en', 'es', 'fr', 'it', 'lt', 'nb', 'nl', 'pt']
 
     parser = argparse.ArgumentParser()
     parser.add_argument('-lang_src', required=True, choices=spacy_support_langs)
@@ -279,7 +279,6 @@ def main_wo_bpe():
     parser.add_argument('-min_word_count', type=int, default=3)
     parser.add_argument('-keep_case', action='store_true')
     parser.add_argument('-share_vocab', action='store_true')
-    parser.add_argument('-data_path', type=str, required=True)
     #parser.add_argument('-ratio', '--train_valid_test_ratio', type=int, nargs=3, metavar=(8,1,1))
     #parser.add_argument('-vocab', default=None)
 
@@ -309,7 +308,7 @@ def main_wo_bpe():
     MIN_FREQ = opt.min_word_count
 
     if not all([opt.data_src, opt.data_trg]):
-        assert {opt.lang_src, opt.lang_trg} == {'de_core_news_sm', 'en_core_web_sm'}
+        assert {opt.lang_src, opt.lang_trg} == {'de', 'en'}
     else:
         # Pack custom txt file into example datasets
         raise NotImplementedError
@@ -317,14 +316,10 @@ def main_wo_bpe():
     def filter_examples_with_length(x):
         return len(vars(x)['src']) <= MAX_LEN and len(vars(x)['trg']) <= MAX_LEN
 
-    def get_short_lang(full_lang):
-        return full_lang.split('_')[0]
-
     train, val, test = Multi30k.splits(
-            exts = ('.' + get_short_lang(opt.lang_src), '.' + get_short_lang(opt.lang_trg)),
+            exts = ('.' + opt.lang_src, '.' + opt.lang_trg),
             fields = (SRC, TRG),
-            filter_pred=filter_examples_with_length,
-            path=opt.data_path)
+            filter_pred=filter_examples_with_length)
 
     SRC.build_vocab(train.src, min_freq=MIN_FREQ)
     print('[Info] Get source language vocabulary size:', len(SRC.vocab))

@@ -12,7 +12,6 @@ import io
 import marshal
 import os
 import pickle
-import psutil
 import struct
 import sys
 import textwrap
@@ -31,8 +30,7 @@ WORKER_IMPL_NAMESPACE = "__worker_impl_namespace"
 # Constants for passing to and from pipes
 _CHECK = b"\x00\x00"
 _TIMEOUT = b"\x01\x01"
-_DEAD = b"\x02\x02"
-assert len(_CHECK) == len(_TIMEOUT) == len(_DEAD)
+assert len(_CHECK) == len(_TIMEOUT)
 
 _ULL = "Q"  # Unsigned long long
 _ULL_SIZE = len(struct.pack(_ULL, 0))
@@ -102,7 +100,7 @@ class _TimeoutPIPE:
     _singleton: typing.Optional["_TimeoutPIPE"] = None
 
     _loop_lock = threading.Lock()
-    _active_reads: typing.Dict[int, typing.Tuple[float, float, int]]
+    _active_reads: typing.Dict[int, typing.Tuple[float, float]]
     _loop_cadence = 1  # second
 
     @classmethod
@@ -127,21 +125,10 @@ class _TimeoutPIPE:
             time.sleep(self._loop_cadence)
             now = time.time()
             with self._loop_lock:
-                for w_fd, (timeout, start_time, writer_pid) in tuple(self._active_reads.items()):
-                    # if child process is in zombie status, check its exit code
-                    if psutil.pid_exists(writer_pid):
-                        p = psutil.Process(writer_pid)
-                        if p.status() == psutil.STATUS_ZOMBIE:
-                            # wait 1 second for the exit code
-                            exit_code = p.wait(timeout=self._loop_cadence)
-                            if exit_code:
-                                os.write(w_fd, _DEAD + struct.pack(_ULL, abs(int(exit_code))))
-                                self.pop(w_fd)
-                    # check if process timeout
-                    if timeout:
-                        if now - start_time >= timeout and w_fd in self._active_reads:
-                            os.write(w_fd, _TIMEOUT)
-                            self.pop(w_fd)
+                for w_fd, (timeout, start_time) in tuple(self._active_reads.items()):
+                    if now - start_time >= timeout and w_fd in self._active_reads:
+                        os.write(w_fd, _TIMEOUT)
+                        self.pop(w_fd)
 
     def pop(self, w_fd: int) -> None:
         self._active_reads.pop(w_fd, None)
@@ -151,16 +138,21 @@ class _TimeoutPIPE:
     def maybe_timeout_read(cls, pipe: "Pipe") -> None:
         timeout = pipe.timeout
 
-        # Spawn a loop thread to periodically check the liveness of subprocess
+        # Workers should never set a timeout, so in that case we want to exit
+        # without calling `cls.singleton()` so we don't spawn an unnecessary
+        # loop thread.
+        if timeout is None:
+            yield
+            return
+
         w_fd = pipe.write_fd
         assert w_fd is not None, "Cannot timeout without write file descriptor."
-        assert pipe.get_writer_pid() is not None, "Cannot check process liveness without pid."
         singleton = cls.singleton()
         with singleton._loop_lock:
             # This will only occur in the case of concurrent reads on different
             # threads (not supported) or a leaked case.
             assert w_fd not in singleton._active_reads, f"{w_fd} is already being watched."
-            singleton._active_reads[w_fd] = (timeout, time.time(), pipe.get_writer_pid())
+            singleton._active_reads[w_fd] = (timeout, time.time())
 
         try:
             yield
@@ -170,30 +162,22 @@ class _TimeoutPIPE:
 
 
 class Pipe:
-    """Helper class to move data in a robust fashion.
+    """Helper class to move data in a robust fashon.
 
     This class handles:
-        1) Child process liveness checks if pipe is read by parent
-        2) File descriptor lifetimes
-        3) File descriptor inheritance
-        4) Message packing and unpacking
-        5) (Optional) timeouts for reads
-
-    NOTE: we don't check liveness of parent since the parent process
-          shouldn't regularly fail without proper clean up.
+        1) File descriptor lifetimes
+        2) File descriptor inheritance
+        3) Message packing and unpacking
+        4) (Optional) timeouts for reads
     """
 
     def __init__(
         self,
-        # writer_pid only exists when `self` is a pipe read by parent
-        # in which case, write_pid is the pid of the child process
-        writer_pid: typing.Optional[int] = None,
         read_handle: typing.Optional[int] = None,
         write_handle: typing.Optional[int] = None,
         timeout: typing.Optional[float] = None,
         timeout_callback: typing.Callable[[], typing.NoReturn] = (lambda: None),
     ) -> None:
-        self._writer_pid = writer_pid
         self._owns_pipe = read_handle is None and write_handle is None
         if self._owns_pipe:
             self.read_fd, self.write_fd = os.pipe()
@@ -210,12 +194,8 @@ class Pipe:
         """Handle the low level details of reading from the PIPE."""
         if self.read_fd is None:
             raise IOError("Cannot read from PIPE, we do not have the read handle")
-        # `self._write_pid` is not None iff `self` is the read pipe from parent process
-        # only support timeout and child process liveness check in this case
-        if self._writer_pid:
-            with _TimeoutPIPE.maybe_timeout_read(self):
-                raw_msg = os.read(self.read_fd, len(_CHECK) + size)
-        else:
+
+        with _TimeoutPIPE.maybe_timeout_read(self):
             raw_msg = os.read(self.read_fd, len(_CHECK) + size)
 
         check_bytes, msg = raw_msg[:len(_CHECK)], raw_msg[len(_CHECK):]
@@ -223,11 +203,8 @@ class Pipe:
             self.timeout_callback()  # Give caller the chance to cleanup.
             raise IOError(f"Exceeded timeout: {self.timeout}")
 
-        if check_bytes == _DEAD:
-            raise IOError(f"Subprocess terminates with code {int.from_bytes(msg, sys.byteorder)}")
-
         if check_bytes != _CHECK:
-            raise IOError(f"{check_bytes} != {_CHECK}, {msg}")
+            raise IOError(f"{check} != {_CHECK}, {msg}")
 
         if len(msg) != size:
             raise IOError(f"len(msg) != size: {len(msg)} vs. {size}")
@@ -251,14 +228,6 @@ class Pipe:
         )
 
         os.write(self.write_fd, packed_msg)
-
-    def get_writer_pid(self) -> int:
-        assert self._writer_pid is not None, "Writer pid is not specified. Maybe calling from child process or input pipe.\
-                                              Please report a bug."
-        return self._writer_pid
-
-    def set_writer_pid(self, writer_pid: int) -> None:
-        self._writer_pid = writer_pid
 
     def _close_fds(self):
         """Factor cleanup to a helper so we can test when it runs."""
@@ -358,28 +327,16 @@ class SerializedException:
         """
         try:
             print_file = io.StringIO()
-            python_vinfo = sys.version_info
-            if python_vinfo.major == 3 and python_vinfo.minor < 10:
-                # Starting from Python 3.10, trackback renames the `etype` parameter to `exc`
-                # and make it positional-only.
-                # doc: https://docs.python.org/3/library/traceback.html#traceback.print_exception
-                traceback.print_exception(
-                    etype=type(e),
-                    value=e,
-                    tb=tb,
-                    file=print_file,
-                )
-            else:
-                traceback.print_exception(
-                    type(e),
-                    value=e,
-                    tb=tb,
-                    file=print_file,
-                )
+            traceback.print_exception(
+                etype=type(e),
+                value=e,
+                tb=tb,
+                file=print_file,
+            )
             print_file.seek(0)
             traceback_print: str = print_file.read()
 
-        except Exception as e:
+        except Exception:
             traceback_print = textwrap.dedent("""
                 Traceback
                     Failed to extract traceback from worker. This is not expected.
@@ -487,7 +444,7 @@ def _run_block(
         _log_progress("SUCCESS")
         result = SUCCESS_BYTES
 
-    except (Exception, KeyboardInterrupt, SystemExit) as e:
+    except (Exception, KeyboardInterrupt) as e:
         tb = sys.exc_info()[2]
         assert tb is not None
         serialized_e = SerializedException.from_exception(e, tb)

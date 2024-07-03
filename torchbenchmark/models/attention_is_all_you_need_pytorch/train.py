@@ -24,6 +24,9 @@ from .transformer.Optim import ScheduledOptim
 import random
 import numpy as np
 
+torch.manual_seed(1337)
+random.seed(1337)
+np.random.seed(1337)
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
@@ -330,6 +333,7 @@ def prepare_dataloaders_from_bpe_files(opt, device):
 
 def prepare_dataloaders(opt, device):
     batch_size = opt.batch_size
+    eval_batch_size = opt.eval_batch_size
     data = pickle.load(open(opt.data_pkl, 'rb'))
 
     opt.max_token_seq_len = data['settings'].max_len
@@ -350,7 +354,7 @@ def prepare_dataloaders(opt, device):
     val = Dataset(examples=data['valid'], fields=fields)
 
     train_iterator = BucketIterator(train, batch_size=batch_size, device=device, train=True)
-    val_iterator = BucketIterator(val, batch_size=batch_size, device=device)
+    val_iterator = BucketIterator(val, batch_size=eval_batch_size, device=device)
 
     return train_iterator, val_iterator
 

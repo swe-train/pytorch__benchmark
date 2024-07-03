@@ -12,7 +12,6 @@ import tempfile
 import textwrap
 import time
 import typing
-from pathlib import Path
 
 import components
 from components._impl.workers import base
@@ -52,7 +51,7 @@ class SubprocessWorker(base.WorkerBase):
     _alive: bool = False
     _bootstrap_timeout: int = 10  # seconds
 
-    def __init__(self, timeout: typing.Optional[float] = None, extra_env: typing.Optional[typing.Dict[str, str]]=None) -> None:
+    def __init__(self, timeout: typing.Optional[float] = None) -> None:
         super().__init__()
 
         # Log inputs and outputs for debugging.
@@ -107,36 +106,20 @@ class SubprocessWorker(base.WorkerBase):
                 "pass_fds": child_fds,
             }
 
-        worker_env = os.environ.copy()
-        if extra_env:
-            worker_env.update(extra_env)
-        # Append the parent process's sys.path to child process environment
-        parent_sys_path = ":".join(list(filter(lambda x: x, sys.path)))
-        if "PYTHONPATH" in worker_env:
-            worker_env["PYTHONPATH"] = f'{worker_env["PYTHONPATH"]}:{parent_sys_path}'
-        else:
-            worker_env["PYTHONPATH"] = parent_sys_path
         self._proc = subprocess.Popen(
             args=self.args,
             stdin=subprocess.PIPE,
             stdout=self._stdout_f,
             stderr=self._stderr_f,
-            env=worker_env,
             encoding=subprocess_rpc.ENCODING,
             bufsize=1,
             cwd=os.getcwd(),
             **popen_kwargs,
         )
 
-        # setup the pid of child process in the output pipe
-        self._output_pipe.set_writer_pid(self._proc.pid)
-
         self._worker_bootstrap_finished: bool = False
         self._bootstrap_worker()
         self._alive = True
-
-    def proc_pid(self):
-        return self._proc.pid
 
     @property
     def working_dir(self) -> str:
@@ -200,7 +183,6 @@ class SubprocessWorker(base.WorkerBase):
             try:
                 import marshal
                 import sys
-                import traceback
                 sys_path_old = list(sys.path)
                 sys.path = marshal.loads(
                     bytes.fromhex({repr(marshal.dumps(sys.path).hex())})
@@ -217,9 +199,7 @@ class SubprocessWorker(base.WorkerBase):
                     output_pipe=output_pipe,
                     load_handle={self._load_pipe.write_handle},
                 )
-            except Exception as e:
-                traceback.print_exc()
-                print(str(e))
+            except:
                 sys.exit(1)
         """).strip()
 
@@ -243,7 +223,6 @@ class SubprocessWorker(base.WorkerBase):
                 # worker died or the bootstrap failed. (E.g. failed to resolve
                 # import path.) This simply allows us to raise a good error.
                 bootstrap_pipe = subprocess_rpc.Pipe(
-                    writer_pid=self._proc.pid,
                     read_handle=self._output_pipe.read_handle,
                     write_handle=self._output_pipe.write_handle,
                     timeout=self._bootstrap_timeout,
@@ -307,14 +286,6 @@ class SubprocessWorker(base.WorkerBase):
                 return
 
             assert isinstance(result, dict)
-            if not result:
-                stdout, stderr = get_output()
-                raise subprocess.SubprocessError(
-                    "Uncaught Exception in worker:"
-                    f"    working_dir: {self.working_dir}\n"
-                    f"    stdout:\n{textwrap.indent(stdout, ' ' * 8)}\n\n"
-                    f"    stderr:\n{textwrap.indent(stderr, ' ' * 8)}")
-
             serialized_e = subprocess_rpc.SerializedException(**result)
             stdout, stderr = get_output()
             subprocess_rpc.SerializedException.raise_from(

@@ -2,7 +2,7 @@ import torch
 from . import isoneutral_pytorch
 from torchbenchmark.tasks import OTHER
 from ...util.model import BenchmarkModel
-from typing import Tuple
+
 
 def _generate_inputs(size):
     import math
@@ -64,8 +64,9 @@ def _generate_inputs(size):
 
 
 class IsoneutralMixing(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, device):
         super(IsoneutralMixing, self).__init__()
+        self.device = device
 
     def forward(
         self,
@@ -94,6 +95,7 @@ class IsoneutralMixing(torch.nn.Module):
         Ai_by,
     ):
         return isoneutral_pytorch.isoneutral_diffusion_pre(
+            self.device,
             maskT,
             maskU,
             maskV,
@@ -119,33 +121,37 @@ class IsoneutralMixing(torch.nn.Module):
             Ai_by,
         )
 
+
 class Model(BenchmarkModel):
     task = OTHER.OTHER_TASKS
 
-    # Original input size: [2 ** i for i in range(12, 23, 2)]
-    # Source: https://github.com/dionhaefner/pyhpc-benchmarks/blob/650ecc650e394df829944ffcf09e9d646ec69691/run.py#L25
-    # Pick data-point when i = 20, size = 1048576
-    DEFAULT_EVAL_BSIZE = 1048576
-    CANNOT_SET_CUSTOM_OPTIMIZER = True
-
-    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
-
-        self.model = IsoneutralMixing().to(device=device)
-        input_size = self.batch_size
-        raw_inputs = _generate_inputs(input_size)
-        if hasattr(isoneutral_pytorch, "prepare_inputs"):
-            inputs = isoneutral_pytorch.prepare_inputs(*raw_inputs, device=device)
-        self.example_inputs = inputs
+    def __init__(self, device=None, jit=False):
+        super().__init__()
+        self.device = device
+        self.jit = jit
+        self.model = IsoneutralMixing(self.device).to(device=self.device)
+        self.example_inputs = tuple(
+            torch.from_numpy(x).to(self.device) for x in _generate_inputs(2 ** 22)
+        )
+        if self.jit:
+            if hasattr(torch.jit, '_script_pdt'):
+                self.model = torch.jit._script_pdt(self.model, example_inputs=[self.example_inputs, ])
+            else:
+                self.model = torch.jit.script(self.model, example_inputs = [self.example_inputs, ])
 
     def get_module(self):
         return self.model, self.example_inputs
 
-    def train(self):
+    def train(self, niter=1):
         raise NotImplementedError("Training not supported")
 
-    def eval(self) -> Tuple[torch.Tensor]:
+    def eval(self, niter=1):
         model, example_inputs = self.get_module()
-        with torch.no_grad():
-            out = model(*example_inputs)
-        return out
+        for i in range(niter):
+            model(*example_inputs)
+
+if __name__ == "__main__":
+    m = Model(device="cuda", jit=True)
+    module, example_inputs = m.get_module()
+    module(*example_inputs)
+    m.eval(niter=1)

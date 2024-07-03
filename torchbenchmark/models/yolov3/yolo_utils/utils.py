@@ -424,7 +424,7 @@ def build_targets(p, targets, model):
         anchors = model.module.module_list[j].anchor_vec if multi_gpu else model.module_list[j].anchor_vec
         gain[2:] = torch.tensor(p[i].shape)[[3, 2, 3, 2]]  # xyxy gain
         na = anchors.shape[0]  # number of anchors
-        at = torch.arange(na, device=targets.device).view(na, 1).repeat(1, nt)  # anchor tensor, same as .repeat_interleave(nt)
+        at = torch.arange(na).view(na, 1).repeat(1, nt)  # anchor tensor, same as .repeat_interleave(nt)
 
         # Match targets to anchors
         a, t, offsets = [], targets * gain, 0
@@ -1071,4 +1071,4 @@ def plot_results(start=0, stop=0, bucket='', id=()):  # from utils.utils import 
             print('Warning: Plotting error for %s, skipping file' % f)
 
     ax[1].legend()
-    # fig.savefig('results.png', dpi=200)
+    fig.savefig('results.png', dpi=200)

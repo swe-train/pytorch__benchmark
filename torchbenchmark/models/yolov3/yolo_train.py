@@ -12,22 +12,13 @@ from .yolo_utils.utils import *
 from .yolo_utils.parse_config import parse_data_cfg
 from pathlib import Path
 
-def print(*args):
-    pass
-
-def _prefetch_loader(loader, size, fields=[], collate_fn=lambda x: x):
-    result = []
-    for index, item in enumerate(loader):
-        litem = list(item)
-        for f in fields:
-            litem[f] = collate_fn(litem[f])
-        result.append(tuple(litem))
-        if index == size:
-            break
-    return result
-
 def prepare_training_loop(args):
-    mixed_precision = False
+    mixed_precision = True
+    try:  # Mixed precision training https://github.com/NVIDIA/apex
+        from apex import amp
+    except:
+        print('Apex recommended for faster mixed precision training: https://github.com/NVIDIA/apex')
+        mixed_precision = False  # not installed
 
     wdir = 'weights' + os.sep  # weights dir
     last = wdir + 'last.pt'
@@ -87,8 +78,7 @@ def prepare_training_loop(args):
         img_size = imgsz_max  # initialize with max size
 
         # Configure run
-        # do not init seeds because it is already initialized in __init__.py
-        # init_seeds(0)
+        init_seeds(0)
         data_dict = parse_data_cfg(data)
         train_path = os.path.dirname(__file__) + '/' + data_dict['train']
         test_path = os.path.dirname(__file__) + '/' + data_dict['valid']
@@ -146,9 +136,9 @@ def prepare_training_loop(args):
                 best_fitness = ckpt['best_fitness']
 
             # load results
-            # if ckpt.get('training_results') is not None:
-            #     with open(results_file, 'w') as file:
-            #         file.write(ckpt['training_results'])  # write results.txt
+            if ckpt.get('training_results') is not None:
+                with open(results_file, 'w') as file:
+                    file.write(ckpt['training_results'])  # write results.txt
 
             # epochs
             start_epoch = ckpt['epoch'] + 1
@@ -213,8 +203,6 @@ def prepare_training_loop(args):
         # Dataloader
         batch_size = min(batch_size, len(dataset))
         nw = min([os.cpu_count(), batch_size if batch_size > 1 else 0, 8])  # number of workers
-        # load with single process
-        nw = 0
         dataloader = torch.utils.data.DataLoader(dataset,
                                                 batch_size=batch_size,
                                                 num_workers=nw,
@@ -232,11 +220,6 @@ def prepare_training_loop(args):
                                                 num_workers=nw,
                                                 pin_memory=True,
                                                 collate_fn=dataset.collate_fn)
-        # TorchBench: prefetch the dataloader
-        if opt.prefetch:
-            dataloader = _prefetch_loader(dataloader, size=opt.train_num_batch*batch_size,
-                                          fields=[0, 1],
-                                          collate_fn=lambda x: x.to(device) if isinstance(x, torch.Tensor) else x)
 
         # Model parameters
         model.nc = nc  # attach number of classes to model
@@ -247,7 +230,7 @@ def prepare_training_loop(args):
         # Model EMA
         ema = torch_utils.ModelEMA(model)
 
-        def train_loop(epochs=1):
+        def train_loop(epochs):
             epoch = 0
             nonlocal img_size, best_fitness
             # Start training
@@ -257,9 +240,9 @@ def prepare_training_loop(args):
             # torch.autograd.set_detect_anomaly(True)
             results = (0, 0, 0, 0, 0, 0, 0)  # 'P', 'R', 'mAP', 'F1', 'val GIoU', 'val Objectness', 'val Classification'
             t0 = time.time()
-            # print('Image sizes %g - %g train, %g test' % (imgsz_min, imgsz_max, imgsz_test))
-            # print('Using %g dataloader workers' % nw)
-            # print('Starting training for %g epochs...' % epochs)
+            print('Image sizes %g - %g train, %g test' % (imgsz_min, imgsz_max, imgsz_test))
+            print('Using %g dataloader workers' % nw)
+            print('Starting training for %g epochs...' % epochs)
             for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
                 model.train()
 
@@ -270,9 +253,8 @@ def prepare_training_loop(args):
                     dataset.indices = random.choices(range(dataset.n), weights=image_weights, k=dataset.n)  # rand weighted idx
 
                 mloss = torch.zeros(4).to(device)  # mean losses
-                # print(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'GIoU', 'obj', 'cls', 'total', 'targets', 'img_size'))
-                # pbar = tqdm(zip(range(opt.train_num_batch), dataloader), total=nb)  # progress bar
-                pbar = zip(range(opt.train_num_batch), dataloader)
+                print(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'GIoU', 'obj', 'cls', 'total', 'targets', 'img_size'))
+                pbar = tqdm(enumerate(dataloader), total=nb)  # progress bar
                 for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
                     if i > 3:
                         break
@@ -328,15 +310,14 @@ def prepare_training_loop(args):
                     mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
                     mem = '%.3gG' % (torch.cuda.memory_cached() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
                     s = ('%10s' * 2 + '%10.3g' * 6) % ('%g/%g' % (epoch, epochs - 1), mem, *mloss, len(targets), img_size)
-                    # pbar.set_description(s)
+                    pbar.set_description(s)
 
                     # Plot
                     if ni < 1:
                         f = 'train_batch%g.jpg' % i  # filename
-                        # TorchBench: do not write result jpg
-                        # res = plot_images(images=imgs, targets=targets, paths=paths, fname=f)
-                        # if tb_writer:
-                            # tb_writer.add_image(f, res, dataformats='HWC', global_step=epoch)
+                        res = plot_images(images=imgs, targets=targets, paths=paths, fname=f)
+                        if tb_writer:
+                            tb_writer.add_image(f, res, dataformats='HWC', global_step=epoch)
                             # tb_writer.add_graph(model, imgs)  # add model to tensorboard
 
                     # end batch ------------------------------------------------------------------------------------------------
@@ -359,8 +340,8 @@ def prepare_training_loop(args):
                 #                             multi_label=ni > n_burn)
 
                 # Write
-                # with open(results_file, 'a') as f:
-                #     f.write(s + '%10.3g' * 7 % results + '\n')  # P, R, mAP, F1, test_losses=(GIoU, obj, cls)
+                with open(results_file, 'a') as f:
+                    f.write(s + '%10.3g' * 7 % results + '\n')  # P, R, mAP, F1, test_losses=(GIoU, obj, cls)
                 if len(opt.name) and opt.bucket:
                     os.system('gsutil cp results.txt gs://%s/results/results%s.txt' % (opt.bucket, opt.name))
 
@@ -379,8 +360,6 @@ def prepare_training_loop(args):
 
                 # Save model
                 save = (not opt.nosave) or (final_epoch and not opt.evolve)
-                # TorchBench: do not save the result
-                save = False
                 if save:
                     with open(results_file, 'r') as f:  # create checkpoint
                         ckpt = {'epoch': epoch,
@@ -409,14 +388,13 @@ def prepare_training_loop(args):
                         strip_optimizer(f2) if ispt else None  # strip optimizer
                         os.system('gsutil cp %s gs://%s/weights' % (f2, opt.bucket)) if opt.bucket and ispt else None  # upload
 
-            # if not opt.evolve:
-            #     plot_results()  # save as results.png
-            # print('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
+            if not opt.evolve:
+                plot_results()  # save as results.png
+            print('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
             # dist.destroy_process_group() if torch.cuda.device_count() > 1 else None
-            # torchbench: disable empty cache
-            # torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
             return results
-        return train_loop, model, dataloader
+        return train_loop
 
     root = str(Path(__file__).parent.resolve())
     parser = argparse.ArgumentParser()
@@ -439,11 +417,7 @@ def prepare_training_loop(args):
     parser.add_argument('--adam', action='store_true', help='use adam optimizer')
     parser.add_argument('--single-cls', action='store_true', help='train as single-class dataset')
     parser.add_argument('--freeze-layers', action='store_true', help='Freeze non-output layers')
-    # Extra args added by TorchBench
-    parser.add_argument('--train-num-batch', type=int, default=1, help='Number of batches to run')
-    parser.add_argument('--prefetch', action='store_true', help='Whether to prefetch dataloader')
     opt = parser.parse_args(args)
-
     opt.weights = last if opt.resume else opt.weights
     # check_git_status()
     opt.cfg = check_file(opt.cfg)  # check file
@@ -459,8 +433,8 @@ def prepare_training_loop(args):
 
     tb_writer = None
     if not opt.evolve:  # Train normally
-        # print('Start Tensorboard with "tensorboard --logdir=runs", view at http://localhost:6006/')
-        # tb_writer = SummaryWriter(comment=opt.name)
+        print('Start Tensorboard with "tensorboard --logdir=runs", view at http://localhost:6006/')
+        tb_writer = SummaryWriter(comment=opt.name)
         return get_train(hyp)  # train normally
     else:  # Evolve hyperparameters (optional)
         opt.notest, opt.nosave = True, True  # only test/save final epoch

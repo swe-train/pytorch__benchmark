@@ -1,9 +1,9 @@
 # PyTorch Benchmarks
 This is a collection of open source benchmarks used to evaluate PyTorch performance.
 
-`torchbenchmark/models` contains copies of popular or exemplary workloads which have been modified to:
-*(a)* expose a standardized API for benchmark drivers, *(b)* optionally, enable JIT,
- *(c)* contain a miniature version of train/test data and a dependency install script.
+`torchbenchmark/models` contains copies of popular or exemplary workloads which have been modified to
+(a) expose a standardized API for benchmark drivers, (b) optionally, enable JIT,
+ (c) contain a miniature version of train/test data and a dependency install script.
 
 ## Installation
 The benchmark suite should be self contained in terms of dependencies,
@@ -11,61 +11,53 @@ except for the torch products which are intended to be installed separately so
 different torch versions can be benchmarked.
 
 ### Using Pre-built Packages
-We support Python 3.8+, and 3.10 is recommended. Conda is optional but suggested. To start with Python 3.10 in conda:
+Use python 3.7 as currently there are compatibility issues with 3.8+.  Conda is optional but suggested.  To switch to python 3.7 in conda:
 ```
-# Using your current conda environment:
-conda install -y python=3.10
+# using your current conda environment:
+conda install -y python=3.7
 
-# Or, using a new conda environment:
-conda create -n torchbenchmark python=3.10
+# or, using a new conda environment
+conda create -n torchbenchmark python=3.7
 conda activate torchbenchmark
 ```
 
-If you are running NVIDIA GPU tests, we support CUDA 11.7+, and use CUDA 11.7 as default:
+Install pytorch, torchtext, and torchvision using conda:
 ```
-conda install -y -c pytorch magma-cuda117
-```
-
-Then install pytorch, torchtext, torchvision, and torchaudio using conda:
-```
-conda install pytorch torchvision torchtext torchaudio pytorch-cuda=11.7 -c pytorch-nightly -c nvidia
+conda install -y pytorch torchtext torchvision -c pytorch-nightly
 ```
 Or use pip:
 (but don't mix and match pip and conda for the torch family of libs! - [see notes below](#notes))
 ```
-pip install --pre torch torchvision torchtext torchaudio -f https://download.pytorch.org/whl/nightly/cu117/torch_nightly.html
-```
-
-Install other necessary libraries:
-```
-pip install pyyaml
+pip install --pre torch torchvision torchtext -f https://download.pytorch.org/whl/nightly/cu102/torch_nightly.html
 ```
 
 Install the benchmark suite, which will recursively install dependencies for all the models.  Currently, the repo is intended to be installed from the source tree.
 ```
-git clone https://github.com/pytorch/benchmark
-cd benchmark
+git clone <benchmark>
+cd <benchmark>
 python install.py
 ```
 
 ### Building From Source
-Note that when building PyTorch from source, torchtext, torchvision and torchaudio must also be built from source to make sure the C APIs match.
+Note that when building PyTorch from source, torchtext and torchvision must also be built from source to make sure the C APIs match.
 
-See detailed instructions to install torchtext [here](https://github.com/pytorch/text), torchvision [here](https://github.com/pytorch/vision) and torchaudio [here](https://github.com/pytorch/audio).
+See detailed instructions to install torchtext [here](https://github.com/pytorch/text), and torchvision [here](https://github.com/pytorch/vision).
 Make sure to enable CUDA (by `FORCE_CUDA=1`) if using CUDA.
 Then,
 ```
-git clone https://github.com/pytorch/benchmark
-cd benchmark
+git clone <benchmark>
+cd <benchmark>
 python install.py
 ```
 
 ### Notes
-- Setup steps require network connectivity - make sure to enable a proxy if needed.
-- We suggest using the latest PyTorch nightly releases to run the benchmark. Stable versions are NOT tested or maintained.
-- torch, torchtext, torchvision, and torchaudio must all be installed from the same build process.  This means it isn't possible to mix conda torchtext
+- Setup steps require connectivity, make sure to enable a proxy if needed.
+- See the [CI scripts](scripts/) and their orchestration in [config.yml](.circleci/config.yml)
+for hints about how to replicate the CI environment if you have issues
+- PyTorch versions before 1.6 are not compatible with all the models in torchbenchmark.  See branch [wconstab/compare_torch_versions](https://github.com/pytorch/benchmark/tree/wconstab/compare_torch_versions) for a set of models that worked back to torch 1.4.0.
+- torch, torchtext, and torchvision must all be installed from the same build process.  This means it isn't possible to mix conda torchtext
   with pip torch, or mix built-from-source torch with pip torchtext.  It's important to match even the conda channel (nightly vs regular).
-  This is due to the differences in the compilation process used by different packaging systems producing incompatible Python binary extensions.
+  This is due to the differences in the compilation process used by different packaging systems producing incompatible python binary extensions.
 
 ## Using a low-noise machine
 Various sources of noise, such as interrupts, context switches, clock frequency scaling, etc. can all conspire to make benchmark results variable.  It's important to understand the level of noise in your setup before drawing conclusions from benchmark data.  While any machine can in principle be tuned up, the steps and end-results vary with OS, kernel, drivers, and hardware.  To this end, torchbenchmark picks a favorite machine type it can support well, and provides utilities for automated tuning on that machine.  In the future, we may support more machine types and would be happy for contributions here.
@@ -81,15 +73,13 @@ When running pytest (see below), the machine_config script is invoked to assert 
 
 
 ## Running Model Benchmarks
-There are multiple ways for running the model benchmarks.
+There are currently two top-level scripts for running the models.
 
 `test.py` offers the simplest wrapper around the infrastructure for iterating through each model and installing and executing it.
 
 `test_bench.py` is a pytest-benchmark script that leverages the same infrastructure but collects benchmark statistics and supports pytest filtering.
 
-`userbenchmark` allows to develop and run customized benchmarks.
-
-In each model repo, the assumption is that the user would already have all of the torch family of packages installed (torch, torchtext, torchvision,...) but it installs the rest of the dependencies for the model.
+In each model repo, the assumption is that the user would already have all of the torch family of packages installed (torch, torchtext, torchvision, ...) but it installs the rest of the dependencies for the model.
 
 ### Using `test.py`
 `python test.py` will execute the APIs for each model, as a sanity check.  For benchmarking, use `test_bench.py`.  It is based on unittest, and supports filtering via CLI.
@@ -114,12 +104,6 @@ Some useful options include:
 - `--collect-only` only show what tests would run, useful to see what models there are or debug your filter expression
 - `--cpu_only` if running on a local CPU machine and ignoring machine configuration checks
 
-Note that `test_bench.py` will eventually be deprecated as the `userbenchmark` work evolve. Users are encouraged to explore and consider using [userbenchmark](#using-userbenchmark).
-
-### Using userbenchmark
-
-The `userbenchmark` allows you to develop your customized benchmarks with TorchBench models. Refer to the [userbenchamrk instructions](https://github.com/pytorch/benchmark/blob/main/userbenchmark/ADDING_USERBENCHMARKS.md) to learn more on how you can create a new `userbenchmark`. You can then use the `run_benchmark.py` driver to drive the benchmark. e.g. `python run_benchmark.py <benchmark_name>`. Run `python run_benchmark.py —help` to find out available options.
-
 ### Using `run.py` for simple debugging or profiling
 Sometimes you may want to just run train or eval on a particular model, e.g. for debugging or profiling.  Rather than relying on __main__ implementations inside each model, `run.py` provides a lightweight CLI for this purpose, building on top of the standard BenchmarkModel API.
 
@@ -134,14 +118,17 @@ Note: `<model>` can be a full, exact name, or a partial string match.
 
 ## Nightly CI runs
 
-Currently, the models run on nightly pytorch builds and push data to Meta's internal database.
+Currently, the models run on nightly pytorch builds and push data to Facebook's internal database.
 The [Nightly CI](https://github.com/pytorch/benchmark/actions) publishes both
 [V1](torchbenchmark/score/configs/v1/config-v1.md) and
 [V0](torchbenchmark/score/configs/v0/config-v0.md) performance scores.
 
 
-See [Unidash](https://www.internalfb.com/intern/unidash/dashboard/pytorch_benchmarks/torchbenchmark_v0/) (Meta-internal only)
+See [Unidash](https://www.internalfb.com/intern/unidash/dashboard/pytorch_benchmarks/torchbenchmark_v0/) (internal only)
 
 ## Adding new models
 
 See [Adding Models](torchbenchmark/models/ADDING_MODELS.md).
+
+## Legacy
+See `legacy` for rnn benchmarks and related scripts that were previously at the top level of this repo.
