@@ -4,6 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import torch
 import torch as th
 from torch import nn
 
@@ -23,7 +24,7 @@ class Shift(nn.Module):
             if not self.training:
                 wav = wav[..., :length]
             else:
-                offsets = th.randint(self.shift, [batch, sources, 1, 1], device=wav.device)
+                offsets = th.randint(self.shift, [batch, sources, 1, 1], device=wav.device, dtype=th.int64)
                 offsets = offsets.expand(-1, -1, channels, -1)
                 indexes = th.arange(length, device=wav.device)
                 wav = wav.gather(3, indexes + offsets)
@@ -37,7 +38,7 @@ class FlipChannels(nn.Module):
     def forward(self, wav):
         batch, sources, channels, time = wav.size()
         if self.training and wav.size(2) == 2:
-            left = th.randint(2, (batch, sources, 1, 1), device=wav.device)
+            left = th.randint(2, (batch, sources, 1, 1), device=wav.device, dtype=th.int64)
             left = left.expand(-1, -1, -1, time)
             right = 1 - left
             wav = th.cat([wav.gather(2, left), wav.gather(2, right)], dim=2)
@@ -77,7 +78,10 @@ class Remix(nn.Module):
         device = wav.device
 
         if self.training:
-            group_size = self.group_size or batch
+            if self.group_size is not None:
+                group_size = self.group_size
+            else:
+                group_size = batch
             if batch % group_size != 0:
                 raise ValueError(f"Batch size {batch} must be divisible by group size {group_size}")
             groups = batch // group_size

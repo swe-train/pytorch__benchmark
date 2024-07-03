@@ -17,47 +17,59 @@ from pathlib import Path
 from ...util.model import BenchmarkModel
 from torchbenchmark.tasks import COMPUTER_VISION
 
-torch.manual_seed(1337)
-random.seed(1337)
-np.random.seed(1337)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = False
+torch.backends.cudnn.benchmark = True
 
 def _collate_filter_none(batch):
     batch = list(filter(lambda x: x is not None, batch))
     return torch.utils.data.dataloader.default_collate(batch)
 
+def _create_data_dir():
+    data_dir = Path(__file__).parent.joinpath(".data")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
+
 class Model(BenchmarkModel):
     task = COMPUTER_VISION.OTHER_COMPUTER_VISION
-    def __init__(self, device=None, jit=False):
-        super().__init__()
-        self.device = device
-        self.jit = jit
+    # Original btach size: 4
+    # Original hardware: unknown
+    # Source: https://arxiv.org/pdf/2004.00626.pdf
+    DEFAULT_TRAIN_BSIZE = 4
+    DEFAULT_EVAL_BSIZE = 1
+    ALLOW_CUSTOMIZE_BSIZE = False
+
+    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
+        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
+
         self.opt = Namespace(**{
             'n_blocks1': 7,
             'n_blocks2': 3,
-            'batch_size': 1,
+            'batch_size': self.batch_size,
             'resolution': 512,
             'name': 'Real_fixed'
         })
 
         scriptdir = os.path.dirname(os.path.realpath(__file__))
-        csv_file = "Video_data_train_processed.csv"
+        csv_file_path = _create_data_dir().joinpath("Video_data_train_processed.csv")
         root = str(Path(__file__).parent)
         with open(f"{root}/Video_data_train.csv", "r") as r:
-            with open(csv_file, "w") as w:
+            with open(csv_file_path, "w") as w:
                 w.write(r.read().format(scriptdir=scriptdir))
         data_config_train = {
             'reso': (self.opt.resolution, self.opt.resolution)}
-        traindata = VideoData(csv_file=csv_file,
+        traindata = VideoData(csv_file=csv_file_path,
                               data_config=data_config_train, transform=None)
-        self.train_loader = torch.utils.data.DataLoader(
-            traindata, batch_size=self.opt.batch_size, shuffle=True, num_workers=self.opt.batch_size, collate_fn=_collate_filter_none)
+        train_loader = torch.utils.data.DataLoader(
+            traindata, batch_size=self.opt.batch_size, shuffle=True, num_workers=0, collate_fn=_collate_filter_none)
+        self.train_data = []
+        for data in train_loader:
+            self.train_data.append(data)
+            for key in data:
+                data[key].to(self.device)
 
         netB = ResnetConditionHR(input_nc=(
             3, 3, 1, 4), output_nc=4, n_blocks1=self.opt.n_blocks1, n_blocks2=self.opt.n_blocks2)
-        if self.device == 'cuda':
-            netB.cuda()
+        netB.to(self.device)
         netB.eval()
         for param in netB.parameters():  # freeze netB
             param.requires_grad = False
@@ -68,18 +80,14 @@ class Model(BenchmarkModel):
         netG.apply(conv_init)
         self.netG = netG
 
-        if self.device == 'cuda':
-            self.netG.cuda()
-            # TODO(asuhan): is this needed?
-            torch.backends.cudnn.benchmark = True
+        self.netG.to(self.device)
 
         netD = MultiscaleDiscriminator(
             input_nc=3, num_D=1, norm_layer=nn.InstanceNorm2d, ndf=64)
         netD.apply(conv_init)
         # netD = nn.DataParallel(netD)
         self.netD = netD
-        if self.device == 'cuda':
-            self.netD.cuda()
+        self.netD.to(self.device)
 
         self.l1_loss = alpha_loss()
         self.c_loss = compose_loss()
@@ -95,14 +103,10 @@ class Model(BenchmarkModel):
         self._maybe_trace()
 
     def _maybe_trace(self):
-        for data in self.train_loader:
+        for data in self.train_data:
             bg, image, seg, multi_fr = data['bg'], data['image'], data['seg'], data['multi_fr']
-            if self.device == 'cuda':
-                bg, image, seg, multi_fr = Variable(bg.cuda()), Variable(
-                    image.cuda()), Variable(seg.cuda()), Variable(multi_fr.cuda())
-            else:
-                bg, image, seg, multi_fr = Variable(bg), Variable(
-                    image), Variable(seg), Variable(multi_fr)
+            bg, image, seg, multi_fr = Variable(bg.to(self.device)), Variable(
+                image.to(self.device)), Variable(seg.to(self.device)), Variable(multi_fr.to(self.device))
             if self.jit:
                 self.netB = torch.jit.trace(
                     self.netB, (image, bg, seg, multi_fr))
@@ -114,42 +118,33 @@ class Model(BenchmarkModel):
             break
 
     def get_module(self):
-        raise NotImplementedError()
+        # use netG (generation) for the return module
+        for _i, data in enumerate(self.train_data):
+            bg, image, seg, multi_fr, seg_gt, back_rnd = data['bg'], data[
+                'image'], data['seg'], data['multi_fr'], data['seg-gt'], data['back-rnd']
+            return self.netG, (image.to(self.device), bg.to(self.device), seg.to(self.device), multi_fr.to(self.device))
 
-    # eval() isn't implemented
-    # train() is on by default
-    def _set_mode(self, train):
-        pass
-
-    def train(self, niterations=1):
-        if self.device == 'cpu':
-            raise NotImplementedError("Disabled due to excessively slow runtime - see GH Issue #100")
-
+    def train(self, niter=1):
         self.netG.train()
         self.netD.train()
         lG, lD, GenL, DisL_r, DisL_f, alL, fgL, compL, elapse_run, elapse = 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
         t0 = time.time()
-        KK = len(self.train_loader)
+        KK = len(self.train_data)
         wt = 1
         epoch = 0
         step = 50
 
-        for i, data in enumerate(self.train_loader):
-            if (i > niterations):
+        for i, data in enumerate(self.train_data):
+            if (i > niter):
                 break
             # Initiating
 
             bg, image, seg, multi_fr, seg_gt, back_rnd = data['bg'], data[
                 'image'], data['seg'], data['multi_fr'], data['seg-gt'], data['back-rnd']
 
-            if self.device == 'cuda':
-                bg, image, seg, multi_fr, seg_gt, back_rnd = Variable(bg.cuda()), Variable(image.cuda()), Variable(
-                    seg.cuda()), Variable(multi_fr.cuda()), Variable(seg_gt.cuda()), Variable(back_rnd.cuda())
-                mask0 = Variable(torch.ones(seg.shape).cuda())
-            else:
-                bg, image, seg, multi_fr, seg_gt, back_rnd = Variable(bg), Variable(
-                    image), Variable(seg), Variable(multi_fr), Variable(seg_gt), Variable(back_rnd)
-                mask0 = Variable(torch.ones(seg.shape))
+            bg, image, seg, multi_fr, seg_gt, back_rnd = Variable(bg.to(self.device)), Variable(image.to(self.device)), Variable(
+                seg.to(self.device)), Variable(multi_fr.to(self.device)), Variable(seg_gt.to(self.device)), Variable(back_rnd.to(self.device))
+            mask0 = Variable(torch.ones(seg.shape).to(self.device))
 
             tr0 = time.time()
 
@@ -289,5 +284,5 @@ class Model(BenchmarkModel):
             # Change weight every 2 epoch to put more stress on discriminator weight and less on pseudo-supervision
             wt = wt/2
 
-    def eval(self, niterations=1):
+    def eval(self, niter=1):
         raise NotImplementedError()
