@@ -12,7 +12,6 @@ from .speech_transformer.transformer.loss import cal_performance
 from .speech_transformer.utils import add_results_to_json, process_dict, IGNORE_ID
 from .speech_transformer.data import build_LFR_features
 from .speech_transformer.data import AudioDataLoader, AudioDataset
-from torchbenchmark import DATA_PATH
 
 @dataclasses.dataclass
 class SpeechTransformerTrainConfig:
@@ -63,7 +62,7 @@ class SpeechTransformerTrainConfig:
     valid_json = "input_data/dev/data.json"
     dict_txt = "input_data/lang_1char/train_chars.txt"
     def __init__(self, prefetch=True, train_bs=32, num_train_batch=1, device='cuda'):
-        dir_path = os.path.join(DATA_PATH, "speech_transformer_inputs")
+        dir_path = os.path.dirname(os.path.realpath(__file__))
         self.device = device
         self.train_json = os.path.join(dir_path, self.train_json)
         self.valid_json = os.path.join(dir_path, self.valid_json)
@@ -152,17 +151,6 @@ class SpeechTransformerTrainConfig:
         if val_loss < self.best_val_loss:
             self.best_val_loss = val_loss
 
-    # speech transformer has a TransformerOptimizer wrapping an inner Adam optimizer. This returns the TransformerOptimizer.
-    def get_optimizer(self):
-        return self.optimizer
-    
-    def set_optimizer(self, optimizer) -> None:
-        self.optimizer = optimizer
-
-    # Takes in an inner optimizer and wraps it in a TransformerOptimizer
-    def set_inner_optimizer(self, optimizer) -> None:
-        self.optimizer = TransformerOptimizer(optimizer, self.k, self.d_model, self.warmup_steps)
-
 @dataclasses.dataclass
 class SpeechTransformerEvalConfig:
     beam_size = 5
@@ -173,7 +161,7 @@ class SpeechTransformerEvalConfig:
     recog_json = "input_data/test/data.json"
     dict_txt = "input_data/lang_1char/train_chars.txt"
     def __init__(self, traincfg, num_eval_batch=1, device='cuda'):
-        dir_path = os.path.join(DATA_PATH, "speech_transformer_inputs")
+        dir_path = os.path.dirname(os.path.realpath(__file__))
         self.device = device
         self.base_path = dir_path
         self.recog_json = os.path.join(dir_path, self.recog_json)

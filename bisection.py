@@ -1,7 +1,7 @@
 """bisection.py
 Runs bisection to determine PRs that cause performance change.
-It assumes that the pytorch, torchbench, torchtext, torchvision, and torchaudio repositories provided are all clean with the latest code.
-By default, the torchaudio, torchvision and torchtext packages will be fixed to the latest commit on the same pytorch commit date.
+It assumes that the pytorch, torchbench, torchtext and torchvision repositories provided are all clean with the latest code.
+By default, the torchvision and torchtext package version will be fixed to the latest commit on the pytorch commit date.
 
 Usage:
   python bisection.py --work-dir <WORK-DIR> \
@@ -27,10 +27,8 @@ from utils.cuda_utils import prepare_cuda_env, DEFAULT_CUDA_VERSION
 TORCH_GITREPO="https://github.com/pytorch/pytorch.git"
 TORCHBENCH_GITREPO="https://github.com/pytorch/benchmark.git"
 TORCHBENCH_DEPS = {
-    "torchdata": (os.path.expandvars("${HOME}/data"), "main"),
     "torchtext": (os.path.expandvars("${HOME}/text"), "main"),
     "torchvision": (os.path.expandvars("${HOME}/vision"), "main"),
-    "torchaudio": (os.path.expandvars("${HOME}/audio"), "main"),
 }
 
 def exist_dir_path(string):
@@ -153,7 +151,7 @@ class TorchSource:
         self.build_env = build_env
         return True
 
-    # Update pytorch, torchtext, torchvision, and torchaudio repo
+    # Update pytorch, torchtext, and torchvision repo
     def update_repos(self):
         repos = [(self.srcpath, "master")]
         repos.extend(TORCHBENCH_DEPS.values())
@@ -208,11 +206,6 @@ class TorchSource:
     
     # Install dependencies such as torchtext and torchvision
     def build_install_deps(self, build_env):
-        # Build torchdata (required by torchtext)
-        print(f"Building torchdata ...", end="", flush=True)
-        command = "python setup.py install"
-        subprocess.check_call(command, cwd=TORCHBENCH_DEPS["torchdata"][0], env=build_env, shell=True)
-        print("done")
         # Build torchvision
         print(f"Building torchvision ...", end="", flush=True)
         command = "python setup.py install"
@@ -222,10 +215,6 @@ class TorchSource:
         print(f"Building torchtext ...", end="", flush=True)
         command = "python setup.py clean install"
         subprocess.check_call(command, cwd=TORCHBENCH_DEPS["torchtext"][0], env=build_env, shell=True)
-        # Build torchaudio
-        print(f"Building torchaudio ...", end="", flush=True)
-        command = "python setup.py clean install"
-        subprocess.check_call(command, cwd=TORCHBENCH_DEPS["torchaudio"][0], env=build_env, shell=True)
         print("done")
 
     def _build_lazy_tensor(self, commit: Commit, build_env: Dict[str, str]):
@@ -272,7 +261,7 @@ class TorchSource:
         self.build_install_deps(build_env)
 
     def cleanup(self):
-        packages = ["torch"] + list(TORCHBENCH_DEPS.keys())
+        packages = ["torch", "torchtext", "torchvision"]
         CLEANUP_ROUND = 5
         # Clean up multiple times to make sure the packages are all uninstalled
         for _ in range(CLEANUP_ROUND):

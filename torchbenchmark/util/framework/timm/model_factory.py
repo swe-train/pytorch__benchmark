@@ -18,7 +18,7 @@ class TimmModel(BenchmarkModel):
     def __init__(self, model_name, test, device, jit=False, batch_size=None, extra_args=[]):
         super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
         torch.backends.cudnn.deterministic = False
-        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.benchmark = False
 
         self.model = timm.create_model(model_name, pretrained=False, scriptable=True)
         self.cfg = TimmConfig(model = self.model, device = device)
@@ -31,6 +31,9 @@ class TimmModel(BenchmarkModel):
             self.model.train()
         elif test == "eval":
             self.model.eval()
+
+        if device == 'cuda':
+            torch.cuda.empty_cache()
         self.amp_context = suppress
 
     def gen_inputs(self, num_batches:int=1) -> Tuple[Generator, Optional[int]]:
@@ -66,12 +69,6 @@ class TimmModel(BenchmarkModel):
         output = self.model(self.example_inputs)
         return output
 
-    def get_optimizer(self):
-        return self.cfg.optimizer
-
-    def set_optimizer(self, optimizer) -> None:
-        self.cfg.optimizer = optimizer
-
     def enable_fp16_half(self):
         self.model = self.model.half()
         self.example_inputs = self.example_inputs.half()
@@ -86,11 +83,13 @@ class TimmModel(BenchmarkModel):
     def get_module(self):
         return self.model, (self.example_inputs,)
 
-    def train(self):
-        self._step_train()
+    def train(self, niter=1):
+        for _ in range(niter):
+            self._step_train()
 
-    def eval(self) -> typing.Tuple[torch.Tensor]:
+    def eval(self, niter=1) -> typing.Tuple[torch.Tensor]:
         with torch.no_grad():
             with self.amp_context():
-                out = self._step_eval()
+                for _ in range(niter):
+                    out = self._step_eval()
         return (out, )

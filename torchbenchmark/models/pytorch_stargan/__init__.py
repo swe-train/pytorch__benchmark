@@ -9,7 +9,6 @@ from .main import parse_config, makedirs
 from typing import Tuple
 from ...util.model import BenchmarkModel
 from torchbenchmark.tasks import COMPUTER_VISION
-from torchbenchmark import DATA_PATH
 
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = True
@@ -30,18 +29,14 @@ class Model(BenchmarkModel):
     DEFAULT_EVAL_BSIZE = 16
     ALLOW_CUSTOMIZE_BSIZE = False
 
-    # TODO: Customizing the optimizer is nontrivial, perhaps a next step.
-    CANNOT_SET_CUSTOM_OPTIMIZER = True
-
     def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
         super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
 
         # init config
         config = parse_config()
-        config.celeba_image_dir = os.path.join(DATA_PATH, 'pytorch_stargan_inputs/data/celeba/images')
-        config.attr_path = os.path.join(DATA_PATH, 'pytorch_stargan_inputs/data/celeba/list_attr_celeba.txt')
+        config.celeba_image_dir = os.path.join(os.path.dirname(__file__), 'data/celeba/images')
+        config.attr_path = os.path.join(os.path.dirname(__file__), 'data/celeba/list_attr_celeba.txt')
         config.num_iters = 1
-        config.num_workers = 0
         config.batch_size = self.batch_size
         config.use_tensorboard = False
         config.device = device

@@ -30,7 +30,7 @@ class Monitor(ABC):
         Parameters
         ----------
         frequency : float
-            How often the metrics should be monitored. It is in seconds.
+            How often the metrics should be monitored.
         metrics : list
             A list of Record objects that will be monitored.
 
@@ -62,7 +62,6 @@ class Monitor(ABC):
             duration = time.time() - begin
             if duration < frequency:
                 time.sleep(frequency - duration)
-        self._monitoring_iteration()
 
     @abstractmethod
     def _monitoring_iteration(self):
@@ -115,7 +114,6 @@ class Monitor(ABC):
                 "called before stop_recording_metrics")
 
         self._thread_active = False
-        self._thread.wait()
         self._thread = None
 
         return self._collect_records()

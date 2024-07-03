@@ -16,7 +16,6 @@ import numpy as np
 from pathlib import Path
 from ...util.model import BenchmarkModel
 from torchbenchmark.tasks import COMPUTER_VISION
-from torchbenchmark import DATA_PATH
 
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = True
@@ -31,7 +30,7 @@ def _create_data_dir():
     return data_dir
 
 class Model(BenchmarkModel):
-    task = COMPUTER_VISION.PATTERN_RECOGNITION
+    task = COMPUTER_VISION.OTHER_COMPUTER_VISION
     # Original btach size: 4
     # Original hardware: unknown
     # Source: https://arxiv.org/pdf/2004.00626.pdf
@@ -50,11 +49,12 @@ class Model(BenchmarkModel):
             'name': 'Real_fixed'
         })
 
-        datadir = os.path.join(DATA_PATH, "Background_Matting_inputs")
+        scriptdir = os.path.dirname(os.path.realpath(__file__))
         csv_file_path = _create_data_dir().joinpath("Video_data_train_processed.csv")
-        with open(f"{datadir}/Video_data_train.csv", "r") as r:
+        root = str(Path(__file__).parent)
+        with open(f"{root}/Video_data_train.csv", "r") as r:
             with open(csv_file_path, "w") as w:
-                w.write(r.read().format(scriptdir=datadir))
+                w.write(r.read().format(scriptdir=scriptdir))
         data_config_train = {
             'reso': (self.opt.resolution, self.opt.resolution)}
         traindata = VideoData(csv_file=csv_file_path,
@@ -97,8 +97,8 @@ class Model(BenchmarkModel):
         self.optimizerG = optim.Adam(netG.parameters(), lr=1e-4)
         self.optimizerD = optim.Adam(netD.parameters(), lr=1e-5)
 
-        self.log_writer = SummaryWriter(datadir)
-        self.model_dir = datadir
+        self.log_writer = SummaryWriter(scriptdir)
+        self.model_dir = scriptdir
 
         self._maybe_trace()
 

@@ -6,15 +6,12 @@ import torch.optim as optim
 import torchvision.transforms as transforms
 import random
 from typing import Tuple
-import os
 import numpy as np
 
 from argparse import Namespace
 from pathlib import Path
 from ...util.model import BenchmarkModel
 from torchbenchmark.tasks import COMPUTER_VISION
-
-from torchbenchmark import DATA_PATH
 
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
@@ -27,7 +24,7 @@ def _prefetch(data, device):
     return tuple(result)
 
 class Model(BenchmarkModel):
-    task = COMPUTER_VISION.VIDEO_INTERPOLATION
+    task = COMPUTER_VISION.OTHER_COMPUTER_VISION
     # Original code config:
     #    train batch size: 6
     #    eval batch size: 10
@@ -41,7 +38,7 @@ class Model(BenchmarkModel):
         super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
 
         self.model = ModelWrapper(device)
-        root = os.path.join(DATA_PATH, "Super_SloMo_inputs")
+        root = str(Path(__file__).parent)
         self.args = args = Namespace(**{
             'dataset_root': f'{root}/dataset',
             'batch_size': self.batch_size,

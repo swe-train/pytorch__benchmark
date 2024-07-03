@@ -90,10 +90,6 @@ class Detectron2Model(BenchmarkModel):
             args.fcos_use_bn = True
 
         cfg = setup(args)
-        if hasattr(cfg, "MODEL") and cfg.MODEL.DEVICE != self.device:
-            cfg.defrost()
-            cfg.MODEL.DEVICE = self.device
-            cfg.freeze()
         if args.config_file.endswith(".yaml"):
             self.model = build_model(cfg).to(self.device)
         else:
@@ -101,11 +97,7 @@ class Detectron2Model(BenchmarkModel):
 
         # setup model and return the dataloader
         if self.test == "train":
-            if hasattr(self, "FCOS_USE_BN") and self.FCOS_USE_BN:
-                raise NotImplementedError("FCOS train is not supported by upstream detectron2. " \
-                                          "See GH Issue: https://github.com/facebookresearch/detectron2/issues/4369.")
-            self.optimizer = build_optimizer(cfg, self.model)
-            loader = self.setup_train()
+            loader = self.setup_train(cfg, args)
         elif self.test == "eval":
             loader = self.setup_eval(cfg, args)
 
@@ -113,10 +105,11 @@ class Detectron2Model(BenchmarkModel):
         # torchbench: only run 1 batch
         self.NUM_BATCHES = 1
 
-    def setup_train(self):
+    def setup_train(self, cfg, args):
         if hasattr(self, "FCOS_USE_BN") and self.FCOS_USE_BN:
             raise NotImplementedError("FCOS train is not supported by upstream detectron2. " \
                                       "See GH Issue: https://github.com/facebookresearch/detectron2/issues/4369.")
+        self.optimizer = build_optimizer(cfg, self.model)
         checkpointer = DetectionCheckpointer(self.model, optimizer=self.optimizer)
         checkpointer.load(self.model_file)
         self.model.train()
@@ -149,13 +142,6 @@ class Detectron2Model(BenchmarkModel):
 
     def get_module(self):
         return self.model, (self.example_inputs[0], )
-
-    def get_optimizer(self):
-        return self.optimizer
-
-    def set_optimizer(self, optimizer) -> None:
-        self.optimizer = optimizer
-        self.setup_train()
 
     def enable_fp16_half(self):
         assert self.dargs.precision == "fp16", f"Expected precision fp16, get {self.dargs.precision}"

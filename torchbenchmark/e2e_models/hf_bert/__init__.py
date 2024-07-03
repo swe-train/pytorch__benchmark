@@ -4,11 +4,10 @@ import math
 import os
 from pathlib import Path
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.utils.data import DataLoader
 from torchbenchmark.util.e2emodel import E2EBenchmarkModel
 from torchbenchmark.tasks import NLP
-import evaluate
+from datasets import load_metric
 from accelerate import Accelerator
 from transformers import (
     AdamW,
@@ -22,11 +21,6 @@ from transformers import (
 from typing import Optional
 from torchbenchmark.util.framework.transformers.text_classification.dataset import prep_dataset, preprocess_dataset, prep_labels
 from torchbenchmark.util.framework.transformers.text_classification.args import parse_args, parse_torchbench_args
-
-try:
-    import torch._dynamo
-except ImportError:
-    pass
 
 # setup environment variable
 CURRENT_DIR = Path(os.path.dirname(os.path.realpath(__file__)))
@@ -52,7 +46,6 @@ class Model(E2EBenchmarkModel):
         max_seq_length = "128"
         learning_rate = "2e-5"
         num_train_epochs = "3"
-        max_train_steps = "100" # overrides num_train_epochs to run faster
         # this benchmark runs on a single GPU
         cuda_visible_devices = "0"
         output_dir = os.path.join(CURRENT_DIR, ".output")
@@ -63,15 +56,11 @@ class Model(E2EBenchmarkModel):
                   "--per_device_eval_batch_size", str(self.batch_size),
                   "--learning_rate", learning_rate,
                   "--num_train_epochs", num_train_epochs,
-                  "--max_train_steps", max_train_steps,
                   "--output_dir", output_dir]
         hf_args = parse_args(in_arg)
-        self.num_epochs = hf_args.num_train_epochs
 
         # ideally we don't modify the model code directly, but attaching deepspeed
-        # must be done before self.prep initializes accelerator.
-        if self.tb_args.distributed not in ["deepspeed", "ddp", "fsdp", "none"]:
-            raise RuntimeError(f"Unsupported distributed scheme {self.tb_args.distributed} for model hf_t5")
+        # must be done before self.prep initialiazes accelerator.
         if self.tb_args.distributed == "deepspeed":
             zero_opt_cfg = {
                 "zero_optimization": {
@@ -83,7 +72,12 @@ class Model(E2EBenchmarkModel):
             }
             hf_args.deepspeed_plugin = DeepSpeedPlugin()
             hf_args.deepspeed_plugin.deepspeed_config.update(zero_opt_cfg)
-        hf_args.distributed = self.tb_args.distributed # pass in distributed config to prep as a hf_arg
+        elif self.tb_args.distributed == "ddp":
+            hf_args.apply_ddp = True
+        elif self.tb_args.distributed == "none":
+            hf_args.apply_ddp = False
+        else:
+            raise RuntimeError(f"Unsupported distributed scheme {self.tb_args.distributed} for model hf_bert")
 
         # setup other members
         self.prep(hf_args)
@@ -94,7 +88,7 @@ class Model(E2EBenchmarkModel):
     
     def prep(self, hf_args):
         # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
-        if hf_args.distributed == "deepspeed":
+        if hasattr(hf_args, "deepspeed_plugin"):
             # Note: self.tb_args.fp16 could be renamed to better clarify its meaning
             assert self.tb_args.fp16=="amp", "deepspeed is only supported with bf16/amp enabled"
             accelerator = Accelerator(deepspeed_plugin=hf_args.deepspeed_plugin, mixed_precision='bf16')
@@ -130,47 +124,6 @@ class Model(E2EBenchmarkModel):
             train_dataset, shuffle=True, collate_fn=self.data_collator, batch_size=hf_args.per_device_train_batch_size)
         eval_dataloader = DataLoader(eval_dataset, collate_fn=self.data_collator, batch_size=hf_args.per_device_eval_batch_size)
 
-        # transform model for DDP and FSDP
-        if hf_args.distributed == "ddp":
-            # prepare before wrap w/ DDP (or else error)
-            model = accelerator.prepare(model)
-            local_rank = int(os.getenv("LOCAL_RANK", -1))
-            model = DDP(
-                model,
-                device_ids=[local_rank],
-                # If buffer broadcast is necessary, specific optimizations might be
-                # necessary to optimize performance. Disable it by default.
-                broadcast_buffers=False,
-                # Set gradient as bucket view to avoid unnecessary copies
-                gradient_as_bucket_view=True,
-                # TODO: tune bucket_cap_mb
-                static_graph=True,
-            )
-        elif hf_args.distributed == "fsdp":
-            # model needs to be prepared and wrapped w/ FSDP before optimizer is created, because FSDP flattens params
-            model = accelerator.prepare(model)
-            local_rank = int(os.getenv("LOCAL_RANK", -1))
-            torch.cuda.set_device(local_rank)
-            model = FSDP(
-                model,
-                device_id = torch.cuda.current_device()
-            )
-
-        # Setup metrics
-        # Get the metric function
-        if hf_args.task_name is not None:
-            self.metric = evaluate.load("glue", hf_args.task_name)
-        else:
-            self.metric = evaluate.load("accuracy")
-
-        # Setup class members (model and the dataloaders will be updated in _prep_optimizer_and_scheduler() below)
-        self.hf_args = hf_args
-        self.is_regression = is_regression
-        self.accelerator = accelerator
-        self.model = model
-        self.train_dataloader = train_dataloader
-        self.eval_dataloader = eval_dataloader
-
         # Optimizer
         # Split weights in two groups, one with weight decay and the other not.
         no_decay = ["bias", "LayerNorm.weight"]
@@ -184,36 +137,58 @@ class Model(E2EBenchmarkModel):
                 "weight_decay": 0.0,
             },
         ]
-        self.optimizer = AdamW(optimizer_grouped_parameters, lr=hf_args.learning_rate)
-        self._update_everything_with_optimizer()
+        optimizer = AdamW(optimizer_grouped_parameters, lr=hf_args.learning_rate)
 
-    def _update_everything_with_optimizer(self) -> None:
-        # Prepare everything with our `accelerator` with deepspeed or non-distributed environment.
-        if self.hf_args.distributed == "deepspeed" or self.hf_args.distributed == "none":
-            # deepspeed will error unless all components prepared at the same time
-            self.model, self.train_dataloader, self.eval_dataloader, self.optimizer = self.accelerator.prepare(
-                self.model, self.train_dataloader, self.eval_dataloader, self.optimizer)
-        else:
-             # ddp and fsdp need model prepared before wrapping.
-            self.train_dataloader, self.eval_dataloader, self.optimizer = self.accelerator.prepare(
-                self.train_dataloader, self.eval_dataloader, self.optimizer)
-            
+        # Prepare everything with our `accelerator`.
+        model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
+            model, optimizer, train_dataloader, eval_dataloader
+        )
+
         # Note -> the training dataloader needs to be prepared before we grab his length below (cause its length will be
         # shorter in multiprocess)
 
         # Scheduler and math around the number of training steps.
-        num_update_steps_per_epoch = math.ceil(len(self.train_dataloader) / self.hf_args.gradient_accumulation_steps)
-        if self.hf_args.max_train_steps is None:
-            self.hf_args.max_train_steps = self.hf_args.num_train_epochs * num_update_steps_per_epoch
+        num_update_steps_per_epoch = math.ceil(len(train_dataloader) / hf_args.gradient_accumulation_steps)
+        if hf_args.max_train_steps is None:
+            hf_args.max_train_steps = hf_args.num_train_epochs * num_update_steps_per_epoch
         else:
-            self.hf_args.num_train_epochs = math.ceil(self.hf_args.max_train_steps / num_update_steps_per_epoch)
+            hf_args.num_train_epochs = math.ceil(hf_args.max_train_steps / num_update_steps_per_epoch)
 
-        self.lr_scheduler = get_scheduler(
-            name=self.hf_args.lr_scheduler_type,
-            optimizer=self.optimizer,
-            num_warmup_steps=self.hf_args.num_warmup_steps,
-            num_training_steps=self.hf_args.max_train_steps,
+        lr_scheduler = get_scheduler(
+            name=hf_args.lr_scheduler_type,
+            optimizer=optimizer,
+            num_warmup_steps=hf_args.num_warmup_steps,
+            num_training_steps=hf_args.max_train_steps,
         )
+        # Steup metrics
+        # Get the metric function
+        if hf_args.task_name is not None:
+            self.metric = load_metric("glue", hf_args.task_name)
+        else:
+            self.metric = load_metric("accuracy")
+        # Setup class members
+        self.hf_args = hf_args
+        self.is_regression = is_regression
+        self.model = model
+        self.optimizer = optimizer
+        self.train_dataloader = train_dataloader
+        self.eval_dataloader = eval_dataloader
+        self.lr_scheduler = lr_scheduler
+        self.accelerator = accelerator
+
+        if hf_args.apply_ddp:
+            local_rank = int(os.getenv("LOCAL_RANK", -1))
+            self.model = DDP(
+                self.model,
+                device_ids=[local_rank],
+                # If buffer broadcast is necessary, specific optimizations might be
+                # necessary to optimize performance. Disable it by default.
+                broadcast_buffers=False,
+                # Set gradient as bucket view to avoid unnecessary copies
+                gradient_as_bucket_view=True,
+                # TODO: tune bucket_cap_mb
+                static_graph=True,
+            )
 
     def train(self) -> Optional[dict]:
         completed_steps = 0
@@ -221,11 +196,14 @@ class Model(E2EBenchmarkModel):
         for _epoch in range(self.hf_args.num_train_epochs):
             self.model.train()
             for step, batch in enumerate(self.train_dataloader):
-                loss = self.run_forward(batch)
+                outputs = self.model(**batch)
+                loss = outputs.loss
                 loss = loss / self.hf_args.gradient_accumulation_steps
-                self.run_backward(loss)
+                self.accelerator.backward(loss)
                 if step % self.hf_args.gradient_accumulation_steps == 0 or step == len(self.train_dataloader) - 1:
-                    self.run_optimizer_step()
+                    self.optimizer.step()
+                    self.lr_scheduler.step()
+                    self.optimizer.zero_grad()
                     completed_steps += 1
 
                 if completed_steps >= self.hf_args.max_train_steps:
@@ -233,7 +211,7 @@ class Model(E2EBenchmarkModel):
             if self.tb_args.validate_in_train:
                 self.model.eval()
                 for step, batch in enumerate(self.eval_dataloader):
-                    outputs = self.run_eval(batch)
+                    outputs = self.model(**batch)
                     predictions = outputs.logits.argmax(dim=-1) if not self.is_regression else outputs.logits.squeeze()
                     self.metric.add_batch(
                         predictions=self.accelerator.gather(predictions),
@@ -251,7 +229,7 @@ class Model(E2EBenchmarkModel):
 
                 self.model.eval()
                 for step, batch in enumerate(eval_dataloader):
-                    outputs = self.run_eval(batch)
+                    outputs = self.model(**batch)
                     predictions = outputs.logits.argmax(dim=-1)
                     self.metric.add_batch(
                         predictions=self.accelerator.gather(predictions),
@@ -259,16 +237,12 @@ class Model(E2EBenchmarkModel):
                     )
 
                 eval_metric = self.metric.compute()
-        # store accuracy results
-        if self.hf_args.task_name == "cola" and self.tb_args.validate_in_train:
-            self.accuracy = eval_metric["matthews_correlation"]
         return eval_metric
 
     def eval(self) -> Optional[dict]:
         self.model.eval()
         for _step, batch in enumerate(self.eval_dataloader):
-            with torch.no_grad():
-                outputs = self.run_eval(batch)
+            outputs = self.model(**batch)
             predictions = outputs.logits.argmax(dim=-1) if not self.is_regression else outputs.logits.squeeze()
             self.metric.add_batch(
                     predictions=self.accelerator.gather(predictions),
@@ -277,13 +251,6 @@ class Model(E2EBenchmarkModel):
         eval_metric = self.metric.compute()
         return eval_metric
 
-    def get_optimizer(self):
-        return self.optimizer
-
-    def set_optimizer(self, optimizer) -> None:
-        self.optimizer = optimizer
-        self._update_everything_with_optimizer()
-
     def next_batch(self):
         return next(iter(self.train_dataloader))
 
@@ -291,49 +258,11 @@ class Model(E2EBenchmarkModel):
         """
         compute model forward and return loss
         """
-        if self.dynamo:
-            backend = self.opt_args.torchdynamo
-            return torch._dynamo.optimize(backend)(self._run_forward)(input)
-        else:
-            return self._run_forward(input)
-
-    def _run_forward(self, input):
         return self.model(**input).loss
 
     def run_backward(self, loss):
-        if self.dynamo:
-            backend = self.opt_args.torchdynamo
-            return torch._dynamo.optimize(backend)(self._run_backward)(loss)
-        else:
-            return self._run_backward(loss)
-
-    def _run_backward(self, loss):
         self.accelerator.backward(loss)
 
-    def get_optimizer(self):
-        return self.optimizer
-
-    def set_optimizer(self, optimizer) -> None:
-        self.optimizer = optimizer
-
     def run_optimizer_step(self):
-        if self.dynamo and not self.opt_args.dynamo_disable_optimizer_step:
-            backend = self.opt_args.torchdynamo
-            return torch._dynamo.optimize(backend)(self._run_optimizer_step)()
-        else:
-            return self._run_optimizer_step()
-
-    def _run_optimizer_step(self):
         self.optimizer.step()
-        self.lr_scheduler.step()
-        self.optimizer.zero_grad()
 
-    def run_eval(self, input):
-        if self.dynamo:
-            backend = self.opt_args.torchdynamo
-            return torch._dynamo.optimize(backend)(self._run_eval)(input)
-        else:
-            return self._run_eval(input)
-
-    def _run_eval(self, input):
-        return self.model(**input)

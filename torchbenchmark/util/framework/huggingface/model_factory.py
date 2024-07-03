@@ -1,8 +1,6 @@
 import math
 import random
-import os
 import torch
-from contextlib import nullcontext
 from torch import optim
 from torchbenchmark.util.model import BenchmarkModel
 import transformers
@@ -12,10 +10,7 @@ from typing import Tuple
 class_models = {
     # 'name': (train_max_length, eval_max_length, config, model)
     'hf_GPT2': (512, 1024, 'AutoConfig.from_pretrained("gpt2")', 'AutoModelForCausalLM'),
-    'hf_GPT2_large': (512, 1024, 'AutoConfig.from_pretrained("gpt2-large")', 'AutoModelForCausalLM'),
     'hf_T5': (1024, 2048, 'AutoConfig.from_pretrained("t5-small")', 'AutoModelForSeq2SeqLM'),
-    'hf_T5_base': (1024, 2048, 'AutoConfig.from_pretrained("t5-base")', 'AutoModelForSeq2SeqLM'),
-    'hf_T5_large': (512, 512, 'AutoConfig.from_pretrained("t5-large")', 'AutoModelForSeq2SeqLM'),
     'hf_Bart': (512, 512, 'AutoConfig.from_pretrained("facebook/bart-base")', 'AutoModelForSeq2SeqLM'),
     'hf_Reformer': (4096, 4096, 'ReformerConfig()', 'AutoModelForMaskedLM'),
     'hf_BigBird': (1024, 4096, 'BigBirdConfig(attention_type="block_sparse",)', 'AutoModelForMaskedLM'),
@@ -23,8 +18,6 @@ class_models = {
     'hf_DistilBert': (512, 512, 'AutoConfig.from_pretrained("distilbert-base-uncased")', 'AutoModelForMaskedLM'),
     'hf_Longformer': (1024, 4096, 'AutoConfig.from_pretrained("allenai/longformer-base-4096")', 'AutoModelForMaskedLM'),
     'hf_Bert': (512, 512, 'BertConfig()', 'AutoModelForMaskedLM'),
-    # see https://huggingface.co/bert-large-cased
-    'hf_Bert_large': (512, 512, 'BertConfig(hidden_size=1024, num_hidden_layers=24, num_attention_heads=16)', 'AutoModelForMaskedLM'),
 }
 
 cpu_input_slice = {
@@ -65,12 +58,7 @@ class HuggingFaceModel(BenchmarkModel):
             config.num_buckets = 128
         class_ctor = getattr(transformers, class_models[name][3])
         self.model = class_ctor.from_config(config).to(device)
-        self.optimizer = optim.Adam(
-            self.model.parameters(),
-            lr=0.001,
-            # TODO resolve https://github.com/pytorch/torchdynamo/issues/1083
-            capturable=bool(int(os.getenv("ADAM_CAPTURABLE", 0)
-        )))
+        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
 
         # populate these on-demand to avoid wasting memory when not used
         self.vocab_size = config.vocab_size
@@ -91,14 +79,9 @@ class HuggingFaceModel(BenchmarkModel):
                 self.example_inputs['decoder_input_ids'] = eval_context
             self.model.eval()
 
-        self.amp_context = nullcontext
-
-    def get_module(self, wrap_model=True):
+    def get_module(self):
         if class_models[self.name][3] == 'AutoModelForSeq2SeqLM':
             k = 'labels' if self.test == 'train' else 'decoder_input_ids'
-            if not wrap_model:
-                return self.model, (
-                    self.example_inputs['input_ids'], self.example_inputs[k])
             return ArgsToKwargsWrapper(self.model), (
                     self.example_inputs['input_ids'], self.example_inputs[k])
         return self.model, (self.example_inputs["input_ids"], )
@@ -125,16 +108,16 @@ class HuggingFaceModel(BenchmarkModel):
     def enable_fp16_half(self):
         self.model = self.model.half()
 
-    def train(self):
-        with self.amp_context():
+    def train(self, niter=3):
+        for _ in range(niter):
             outputs = self.model(**self.example_inputs)
-        loss = outputs.loss
-        loss.backward()
-        self.optimizer.step()
+            loss = outputs.loss
+            loss.backward()
+            self.optimizer.step()
 
-    def eval(self) -> Tuple[torch.Tensor]:
+    def eval(self, niter=1) -> Tuple[torch.Tensor]:
         with torch.no_grad():
-            with self.amp_context():
+            for _ in range(niter):
                 out = self.model(**self.example_inputs)
         # logits: prediction scores of language modeling head
         # https://github.com/huggingface/transformers/blob/v4.16.2/src/transformers/modeling_outputs.py#L455
@@ -145,6 +128,3 @@ class HuggingFaceModel(BenchmarkModel):
             return (out.logits, )
         else:
             return (out["logits"], )
-
-    def enable_amp(self):
-        self.amp_context = lambda: torch.cuda.amp.autocast(dtype=torch.float16)

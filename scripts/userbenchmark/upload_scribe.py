@@ -61,15 +61,11 @@ class ScribeUploader:
 
 class TorchBenchUserbenchmarkUploader(ScribeUploader):
     CLIENT_NAME = 'torchbench_userbenchmark_upload_scribe.py'
-    # We use the UNIX_USER field to store the name of the benchmark platform
-    UNIX_USER = None
-    SUBMISSION_GROUP_GUID = 'oss-ci'
+    UNIX_USER = 'torchbench_userbenchmark_gcp_a100_ci'
+    SUBMISSION_GROUP_GUID = 'oss-ci-gcp-a100'
 
-    def __init__(self, platform_name):
+    def __init__(self):
         super().__init__('perfpipe_pytorch_user_benchmarks')
-        assert platform_name, f"We require non-empty platform_name from user."
-        self.UNIX_USER = f"torchbench_userbenchmark_{platform_name}_ci"
-
         self.schema = {
             'int': [
                 'time',                     # timestamp of upload
@@ -114,23 +110,16 @@ class TorchBenchUserbenchmarkUploader(ScribeUploader):
         # print(messages)
         self.upload(messages)
 
-def process_benchmark_json(userbenchmark_json):
-    # Result sanity check
-    json_name = os.path.basename(userbenchmark_json.name)
-    benchmark_time = get_metrics_date_from_file(json_name)
-    benchmark_data = json.load(userbenchmark_json)
-    return benchmark_time, benchmark_data
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--userbenchmark_platform", required=True,
-                        help='Name of the userbenchmark platform')
     parser.add_argument("--userbenchmark_json", required=True,
                         type=argparse.FileType('r'),
                         help='Upload userbenchmark json data')
     args = parser.parse_args()
-    benchmark_time, benchmark_data = process_benchmark_json(args.userbenchmark_json)
+    # Result sanity check
+    json_name = os.path.basename(args.userbenchmark_json.name)
+    benchmark_time = get_metrics_date_from_file(json_name)
+    benchmark_data = json.load(args.userbenchmark_json)
     # use uploader
-    uploader = TorchBenchUserbenchmarkUploader(args.userbenchmark_platform)
+    uploader = TorchBenchUserbenchmarkUploader()
     uploader.post_userbenchmark_results(benchmark_time, benchmark_data)
-

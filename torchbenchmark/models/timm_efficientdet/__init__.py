@@ -122,7 +122,6 @@ class Model(BenchmarkModel):
                     f'Model {model_config.num_classes} has more classes than dataset {self.loader_train.dataset.parser.max_label}.')
             self.loader_train = prefetch(self.loader_train, self.device, self.NUM_OF_BATCHES)
             self.loader_eval = prefetch(self.loader_eval, self.device, self.NUM_OF_BATCHES)
-            self.loader = self.loader_train
         elif test == "eval":
             # Create eval loader
             input_config = resolve_input_config(args, model_config)
@@ -145,13 +144,6 @@ class Model(BenchmarkModel):
     def get_module(self):
         for _, (input, target) in zip(range(self.NUM_OF_BATCHES), self.loader):
             return self.model, (input, target)
-
-    def get_optimizer(self):
-        return self.optimizer
-
-    def set_optimizer(self, optimizer) -> None:
-        self.optimizer = optimizer
-        self.lr_scheduler, self.num_epochs = create_scheduler(args, self.optimizer)
 
     def enable_amp(self):
         self.amp_autocast = torch.cuda.amp.autocast

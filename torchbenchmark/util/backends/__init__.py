@@ -12,7 +12,7 @@ def create_backend(fn):
             return None
 
         try:
-            return fn(model, **kwargs)
+            fn(model, **kwargs)
         except KeyboardInterrupt:
             raise
         except Exception as e:
@@ -33,8 +33,5 @@ def list_backends():
 
 # register the backends
 from .jit import torchscript
-from .ait import fx2ait
-from .trt import fx2trt, torch_trt
-from .cudagraph import cudagraph
 
 __all__ = [list_backends, create_backend ]

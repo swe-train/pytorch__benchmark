@@ -1,5 +1,1 @@
 deepspeed
-evaluate
-datasets
-scikit-learn
-tensorboard

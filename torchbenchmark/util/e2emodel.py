@@ -56,20 +56,14 @@ class E2EBenchmarkModel(metaclass=PostInitProcessor):
         assert isinstance(ctx, ContextManager), f"Expected adding a ContextManager, get {type(ctx)}. Please report a bug."
         self.run_contexts.append(context_fn)
 
-    def get_optimizer(self):
-        raise NotImplementedError("Every E2EModel should implement a way to access the optimizer used.")
-
-    def set_optimizer(self, optimizer) -> None:
-        raise NotImplementedError("Every E2EModel should implement a way to swap out the optimizer(s).")
-
     def next_batch(self):
-        raise NotImplementedError("Every E2EModel should implement a way to retrieve the next batch.")
+        raise NotImplementedError("Every E2EModel should implement this")
     
     def run_forward(self, input):
-        raise NotImplementedError("Every E2EModel should implement a modular forward step.")
+        raise NotImplementedError("Every E2EModel should implement this")
 
     def run_backward(self, loss):
-        raise NotImplementedError("Every E2EModel should implement a modular backward step.")
+        raise NotImplementedError("Every E2EModel should implement this")
 
     def run_optimizer_step(self):
-        raise NotImplementedError("Every E2EModel should implement a modular optimizer step.")
+        raise NotImplementedError("Every E2EModel should implement this")

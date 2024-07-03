@@ -1,13 +1,10 @@
 from accelerate.utils.dataclasses import DeepSpeedPlugin
-import functools
 import torch
 import numpy as np
 import math
 import os
 from pathlib import Path
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from torch.utils.data import DataLoader
 from torchbenchmark.util.e2emodel import E2EBenchmarkModel
 from torchbenchmark.tasks import NLP
@@ -25,14 +22,8 @@ from transformers import (
     MBartTokenizer,
     MBartTokenizerFast
 )
-from transformers.models.t5.modeling_t5 import T5Block
 from torchbenchmark.util.framework.transformers.translation.dataset import prep_dataset, preprocess_dataset
 from torchbenchmark.util.framework.transformers.translation.args import parse_args, parse_torchbench_args, task_to_keys
-
-try:
-    import torch._dynamo
-except ImportError:
-    pass
 
 # setup environment variable
 CURRENT_DIR = Path(os.path.dirname(os.path.realpath(__file__)))
@@ -47,7 +38,7 @@ class Model(E2EBenchmarkModel):
         self.device = "cuda"
         self.device_num = 1
         # Parse the extra arguments
-        self.tb_args = parse_torchbench_args(self.extra_args)
+        self.tb_args = parse_torchbench_args(extra_args)
         torch.manual_seed(1337)
         torch.backends.cudnn.deterministic = False
         torch.backends.cudnn.benchmark = True
@@ -58,7 +49,7 @@ class Model(E2EBenchmarkModel):
         max_target_length = "128"
         learning_rate = "2e-5"
         num_train_epochs = "3" # this takes a rather long time for wmt-en-ro
-        max_train_steps = "100" # overrides num_train_epochs to run faster
+        max_train_steps = "1000" # overrides num_train_epochs to run faster
         checkpointing_steps = None # set to a string value, like "1000"
 
         task_name = self.tb_args.task_name
@@ -88,15 +79,9 @@ class Model(E2EBenchmarkModel):
                   "--output_dir", output_dir]
         in_arg.extend(task_args)
         hf_args = parse_args(in_arg)
-        self.num_epochs = hf_args.num_train_epochs
 
         # ideally we don't modify the model code directly, but attaching deepspeed
         # must be done before self.prep initialiazes accelerator.
-        hf_args.distributed = self.tb_args.distributed
-        # supported distributed backends
-        if hf_args.distributed not in ["deepspeed", "ddp", "fsdp", "none"]:
-            raise RuntimeError(f"Unsupported distributed scheme {self.tb_args.distributed} for model hf_t5")
-        # prep args for any distributed backend that needs it
         if self.tb_args.distributed == "deepspeed":
             zero_opt_cfg = {
                 "zero_optimization": {
@@ -108,6 +93,12 @@ class Model(E2EBenchmarkModel):
             }
             hf_args.deepspeed_plugin = DeepSpeedPlugin()
             hf_args.deepspeed_plugin.deepspeed_config.update(zero_opt_cfg)
+        elif self.tb_args.distributed == "ddp":
+            hf_args.apply_ddp = True
+        elif self.tb_args.distributed == "none":
+            hf_args.apply_ddp = False
+        else:
+            raise RuntimeError(f"Unsupported distributed scheme {self.tb_args.distributed} for model hf_t5")
 
         # setup other members
         self.prep(hf_args)
@@ -118,7 +109,7 @@ class Model(E2EBenchmarkModel):
     
     def prep(self, hf_args):
         # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
-        if hf_args.distributed == "deepspeed":
+        if hasattr(hf_args, "deepspeed_plugin"):
             # Note: self.tb_args.fp16 could be renamed to better clarify its meaning
             assert self.tb_args.fp16=="amp", "deepspeed is only supported with bf16/amp enabled"
             accelerator = Accelerator(deepspeed_plugin=hf_args.deepspeed_plugin, mixed_precision='bf16')
@@ -216,41 +207,47 @@ class Model(E2EBenchmarkModel):
         train_dataloader = DataLoader(
             train_dataset, shuffle=True, collate_fn=self.data_collator, batch_size=hf_args.per_device_train_batch_size)
         eval_dataloader = DataLoader(eval_dataset, collate_fn=self.data_collator, batch_size=hf_args.per_device_eval_batch_size)
-        
-        # set distributed strategy before creating optimizer
-        if hf_args.distributed == "ddp":
-            model = accelerator.prepare(model)
-            local_rank = int(os.getenv("LOCAL_RANK", -1))
-            model = DDP(
-                model,
-                device_ids=[local_rank],
-                # If buffer broadcast is necessary, specific optimizations might be
-                # necessary to optimize performance. Disable it by default.
-                broadcast_buffers=False,
-                # Set gradient as bucket view to avoid unnecessary copies
-                gradient_as_bucket_view=True,
-                # TODO: tune bucket_cap_mb
-                static_graph=True,
-            )
-        elif hf_args.distributed == "fsdp":
-            model = accelerator.prepare(model)
-            transformer_auto_wrapper_policy = functools.partial(
-                transformer_auto_wrap_policy,
-                transformer_layer_cls={
-                    T5Block,
-                },
-            )
-            local_rank = int(os.getenv("LOCAL_RANK", -1))
-            torch.cuda.set_device(local_rank)
-            model = FSDP(
-                model,
-                # TODO: seems to make benchmark slower? and profile doesn't work? investigate
-                # auto_wrap_policy=transformer_auto_wrapper_policy,
-                device_id = torch.cuda.current_device()
-            )
-        elif hf_args.distributed == "none":
-            model = accelerator.prepare(model)
 
+        # Optimizer
+        # Split weights in two groups, one with weight decay and the other not.
+        no_decay = ["bias", "LayerNorm.weight", "layer_norm.weight"]
+        optimizer_grouped_parameters = [
+            {
+                "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+                "weight_decay": hf_args.weight_decay,
+            },
+            {
+                "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+                "weight_decay": 0.0,
+            },
+        ]
+        optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=hf_args.learning_rate)
+
+        # Scheduler and math around the number of training steps.
+        overrode_max_train_steps = False
+        num_update_steps_per_epoch = math.ceil(len(train_dataloader) / hf_args.gradient_accumulation_steps)
+        if hf_args.max_train_steps is None:
+            hf_args.max_train_steps = hf_args.num_train_epochs * num_update_steps_per_epoch
+            overrode_max_train_steps = True
+
+        lr_scheduler = get_scheduler(
+            name=hf_args.lr_scheduler_type,
+            optimizer=optimizer,
+            num_warmup_steps=hf_args.num_warmup_steps,
+            num_training_steps=hf_args.max_train_steps,
+        )
+
+        # Prepare everything with our `accelerator`.
+        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
+            model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
+        )
+
+        # We need to recalculate our total training steps as the size of the training dataloader may have changed.
+        num_update_steps_per_epoch = math.ceil(len(train_dataloader) / hf_args.gradient_accumulation_steps)
+        if overrode_max_train_steps:
+            hf_args.max_train_steps = hf_args.num_train_epochs * num_update_steps_per_epoch
+        # Afterwards we recalculate our number of training epochs
+        hf_args.num_train_epochs = math.ceil(hf_args.max_train_steps / num_update_steps_per_epoch)
         # Figure out how many steps we should save the Accelerator states
         if hasattr(hf_args.checkpointing_steps, "isdigit"):
             hf_args.checkpointing_steps = hf_args.checkpointing_steps
@@ -270,61 +267,29 @@ class Model(E2EBenchmarkModel):
         # Setup class members
         self.hf_args = hf_args
         self.model = model
+        self.optimizer = optimizer
         self.train_dataloader = train_dataloader
         self.eval_dataloader = eval_dataloader
+        self.lr_scheduler = lr_scheduler
         self.accelerator = accelerator
         self.tokenizer = tokenizer
         self.metric = metric
         self.config = config
         self.postprocess_text = postprocess_text
 
-        # Optimizer
-        # Split weights in two groups, one with weight decay and the other not.
-        no_decay = ["bias", "LayerNorm.weight", "layer_norm.weight"]
-        optimizer_grouped_parameters = [
-            {
-                "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
-                "weight_decay": hf_args.weight_decay,
-            },
-            {
-                "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
-                "weight_decay": 0.0,
-            },
-        ]
-        self.optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=hf_args.learning_rate)
-        self._update_everything_with_optimizer()
-
-    def _update_everything_with_optimizer(self):
-        # Scheduler and math around the number of training steps.
-        overrode_max_train_steps = False
-        num_update_steps_per_epoch = math.ceil(len(self.train_dataloader) / self.hf_args.gradient_accumulation_steps)
-        if self.hf_args.max_train_steps is None:
-            self.hf_args.max_train_steps = self.hf_args.num_train_epochs * num_update_steps_per_epoch
-            overrode_max_train_steps = True
-
-        self.lr_scheduler = get_scheduler(
-            name=self.hf_args.lr_scheduler_type,
-            optimizer=self.optimizer,
-            num_warmup_steps=self.hf_args.num_warmup_steps,
-            num_training_steps=self.hf_args.max_train_steps,
-        )
-
-        # Prepare everything with our `accelerator`.
-        if self.hf_args.distributed == "deepspeed":
-            # deepspeed will error unless all components prepared at the same time
-            self.model, self.train_dataloader, self.eval_dataloader, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
-                self.model, self.train_dataloader, self.eval_dataloader, self.optimizer, self.lr_scheduler)
-        else:
-            # ddp and fsdp need model prepared before wrapping.
-            self.train_dataloader, self.eval_dataloader, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
-                self.train_dataloader, self.eval_dataloader, self.optimizer, self.lr_scheduler)
-
-        # We need to recalculate our total training steps as the size of the training dataloader may have changed.
-        num_update_steps_per_epoch = math.ceil(len(self.train_dataloader) / self.hf_args.gradient_accumulation_steps)
-        if overrode_max_train_steps:
-            self.hf_args.max_train_steps = self.hf_args.num_train_epochs * num_update_steps_per_epoch
-        # Afterwards we recalculate our number of training epochs
-        self.hf_args.num_train_epochs = math.ceil(self.hf_args.max_train_steps / num_update_steps_per_epoch)
+        if hf_args.apply_ddp:
+            local_rank = int(os.getenv("LOCAL_RANK", -1))
+            self.model = DDP(
+                self.model,
+                device_ids=[local_rank],
+                # If buffer broadcast is necessary, specific optimizations might be
+                # necessary to optimize performance. Disable it by default.
+                broadcast_buffers=False,
+                # Set gradient as bucket view to avoid unnecessary copies
+                gradient_as_bucket_view=True,
+                # TODO: tune bucket_cap_mb
+                static_graph=True,
+            )
 
     def train(self):
         completed_steps = 0
@@ -332,11 +297,14 @@ class Model(E2EBenchmarkModel):
         for epoch in range(self.hf_args.num_train_epochs):
             self.model.train()
             for step, batch in enumerate(self.train_dataloader):
-                loss = self.run_forward(batch)
+                outputs = self.model(**batch)
+                loss = outputs.loss
                 loss = loss / self.hf_args.gradient_accumulation_steps
-                self.run_backward(loss)
+                self.accelerator.backward(loss)
                 if step % self.hf_args.gradient_accumulation_steps == 0 or step == len(self.train_dataloader) - 1:
-                    self.run_optimizer_step()
+                    self.optimizer.step()
+                    self.lr_scheduler.step()
+                    self.optimizer.zero_grad()
                     completed_steps += 1
 
                 if isinstance(self.hf_args.checkpointing_steps, int):
@@ -349,10 +317,7 @@ class Model(E2EBenchmarkModel):
                 if completed_steps >= self.hf_args.max_train_steps:
                     break
             if self.tb_args.validate_in_train:
-                eval_metric = self.eval() # run evaluation
-        # store accuracy results
-        if self.tb_args.validate_in_train:
-            self.accuracy = eval_metric["score"]
+                eval_metric = self.eval() # run evaluation 
         return eval_metric
     
     def eval(self):
@@ -407,13 +372,6 @@ class Model(E2EBenchmarkModel):
         # logger.info({"bleu": eval_metric["score"]})
         return eval_metric
 
-    def get_optimizer(self):
-        return self.optimizer
-
-    def set_optimizer(self, optimizer) -> None:
-        self.optimizer = optimizer
-        self._update_everything_with_optimizer()
-
     def next_batch(self):
         return next(iter(self.train_dataloader))
 
@@ -421,40 +379,11 @@ class Model(E2EBenchmarkModel):
         """
         compute model forward and return loss
         """
-        if self.dynamo:
-            backend = self.opt_args.torchdynamo
-            return torch._dynamo.optimize(backend)(self._run_forward)(input)
-        else:
-            return self._run_forward(input)
-
-    def _run_forward(self, input):
         return self.model(**input).loss
 
     def run_backward(self, loss):
-        if self.dynamo:
-            backend = self.opt_args.torchdynamo
-            return torch._dynamo.optimize(backend)(self._run_backward)(loss)
-        else:
-            return self._run_backward(loss)
-
-    def _run_backward(self, loss):
         self.accelerator.backward(loss)
 
-    def get_optimizer(self):
-        return self.optimizer
-
-    def set_optimizer(self, optimizer) -> None:
-        self.optimizer = optimizer
-
     def run_optimizer_step(self):
-        if self.dynamo and not self.opt_args.dynamo_disable_optimizer_step:
-            backend = self.opt_args.torchdynamo
-            return torch._dynamo.optimize(backend)(self._run_optimizer_step)()
-        else:
-            return self._run_optimizer_step()
-
-    def _run_optimizer_step(self):
         self.optimizer.step()
-        self.lr_scheduler.step()
-        self.optimizer.zero_grad()
 

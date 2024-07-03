@@ -1,2 +1,2 @@
-platform: "ai_cluster"
+platform: "ai-cluster"
 schedule:   "nightly"

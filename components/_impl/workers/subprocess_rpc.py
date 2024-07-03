@@ -12,7 +12,6 @@ import io
 import marshal
 import os
 import pickle
-import psutil
 import struct
 import sys
 import textwrap
@@ -20,6 +19,7 @@ import threading
 import time
 import traceback
 import types
+import psutil
 import typing
 
 
@@ -227,7 +227,7 @@ class Pipe:
             raise IOError(f"Subprocess terminates with code {int.from_bytes(msg, sys.byteorder)}")
 
         if check_bytes != _CHECK:
-            raise IOError(f"{check_bytes} != {_CHECK}, {msg}")
+            raise IOError(f"{check} != {_CHECK}, {msg}")
 
         if len(msg) != size:
             raise IOError(f"len(msg) != size: {len(msg)} vs. {size}")
@@ -358,28 +358,16 @@ class SerializedException:
         """
         try:
             print_file = io.StringIO()
-            python_vinfo = sys.version_info
-            if python_vinfo.major == 3 and python_vinfo.minor < 10:
-                # Starting from Python 3.10, trackback renames the `etype` parameter to `exc`
-                # and make it positional-only.
-                # doc: https://docs.python.org/3/library/traceback.html#traceback.print_exception
-                traceback.print_exception(
-                    etype=type(e),
-                    value=e,
-                    tb=tb,
-                    file=print_file,
-                )
-            else:
-                traceback.print_exception(
-                    type(e),
-                    value=e,
-                    tb=tb,
-                    file=print_file,
-                )
+            traceback.print_exception(
+                etype=type(e),
+                value=e,
+                tb=tb,
+                file=print_file,
+            )
             print_file.seek(0)
             traceback_print: str = print_file.read()
 
-        except Exception as e:
+        except Exception:
             traceback_print = textwrap.dedent("""
                 Traceback
                     Failed to extract traceback from worker. This is not expected.
