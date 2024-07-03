@@ -1,3 +1,14 @@
-cupy
-pynvrtc
-tqdm
+bs4
+patch
+py-cpuinfo
+distro
+iopath
+pytest
+pytest-benchmark
+requests
+tabulate
+timm == 0.4.5
+MonkeyType
+psutil
+pyyaml
+numpy == 1.17.5
