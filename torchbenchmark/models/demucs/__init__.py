@@ -15,8 +15,13 @@ from torch.nn.modules.container import Sequential
 from torchbenchmark.models.demucs.demucs.model import Demucs
 from typing import Optional, Tuple
 
+
+torch.manual_seed(1337)
+random.seed(1337)
+np.random.seed(1337)
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = True
+
 
 class DemucsWrapper(torch.nn.Module):
     def __init__(self, model: Demucs, augment: Sequential) -> None:
@@ -35,22 +40,24 @@ class Model(BenchmarkModel):
     task = OTHER.OTHER_TASKS
     # Original train batch size: 64
     # Source: https://github.com/facebookresearch/demucs/blob/3e5ea549ba921316c587e5f03c0afc0be47a0ced/conf/config.yaml#L37
-    DEFAULT_TRAIN_BSIZE = 64
-    DEFAULT_EVAL_BSIZE = 8
-
-    def __init__(self, test, device, batch_size=None, extra_args=[]) -> None:
-        # reduce the eval batch size when running on CPU
-        # see: https://github.com/pytorch/benchmark/issues/895
-        if device == "cpu":
-            self.DEFAULT_EVAL_BSIZE = max(1, int(self.DEFAULT_EVAL_BSIZE / 8))
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
-
+    def __init__(self, device: Optional[str]=None, jit: bool=False, train_bs=64, eval_bs=8) -> None:
+        super().__init__()
+        self.device = device
+        self.jit = jit
         self.parser = get_parser()
         self.args = self.parser.parse_args([])
         args = self.args
-        model = Demucs(channels=64)
-        model.to(device)
-        samples = 80000
+        self.model = Demucs(channels=64)
+        self.dmodel = self.model
+        self.model.to(device)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=args.lr)
+
+        if 1:
+            samples = 80000
+            # TODO: enable GPU training after it is supported by infra
+            #       see GH issue https://github.com/pytorch/benchmark/issues/652
+            # self.example_inputs = (torch.rand([train_bs, 5, 2, 426888], device=device),)
+            self.eval_example_inputs = (torch.rand([eval_bs, 5, 2, 426888], device=device),)
 
         self.duration = Fraction(samples + args.data_stride, args.samplerate)
         self.stride = Fraction(args.data_stride, args.samplerate)
@@ -66,29 +73,36 @@ class Model(BenchmarkModel):
         else:
             self.augment = Shift(args.data_stride)
 
-        self.model = DemucsWrapper(model, self.augment)
-        
-        if test == "train":
-            self.model.train()
-            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=args.lr)
-        elif test == "eval":
-            self.model.eval()
+        self.model = DemucsWrapper(self.model, self.augment)
 
-        self.example_inputs = (torch.rand([self.batch_size, 5, 2, 426888], device=device),)
+        if self.jit:
+            if hasattr(torch.jit, '_script_pdt'):
+                self.model = torch.jit._script_pdt(self.model, example_inputs = [self.eval_example_inputs, ])
+            else:
+                self.model = torch.jit.script(self.model, example_inputs = [self.eval_example_inputs, ])
+
+    def _set_mode(self, train):
+        self.model.train(train)
 
     def get_module(self) -> Tuple[DemucsWrapper, Tuple[Tensor]]:
-        return self.model, self.example_inputs
+        self.model.eval()
+        return self.model, self.eval_example_inputs
 
-    def eval(self) -> Tuple[torch.Tensor]:
-        sources, estimates = self.model(*self.example_inputs)
-        sources = center_trim(sources, estimates)
-        loss = self.criterion(estimates, sources)
-        return (sources, estimates)
+    def eval(self, niter=1):
+        for _ in range(niter):
+            sources, estimates = self.model(*self.eval_example_inputs)
+            sources = center_trim(sources, estimates)
+            loss = self.criterion(estimates, sources)
 
-    def train(self):
-        sources, estimates = self.model(*self.example_inputs)
-        sources = center_trim(sources, estimates)
-        loss = self.criterion(estimates, sources)
-        loss.backward()
-        self.optimizer.step()
-        self.optimizer.zero_grad()
+    def train(self, niter=1):
+        if self.device == "cpu":
+            raise NotImplementedError("Disable CPU training because it is too slow (> 1min)")
+        if self.device == "cuda":
+            raise NotImplementedError("Disable GPU training because it causes CUDA OOM on T4")
+        for _ in range(niter):
+            sources, estimates = self.model(*self.eval_example_inputs)
+            sources = center_trim(sources, estimates)
+            loss = self.criterion(estimates, sources)
+            loss.backward()
+            self.optimizer.step()
+            self.optimizer.zero_grad()

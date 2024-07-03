@@ -21,7 +21,6 @@ import torch.optim as optim
 import torch.nn as nn
 import torch.nn.functional as F
 from pathlib import Path
-from typing import Tuple
 import higher
 
 from ...util.model import BenchmarkModel
@@ -30,31 +29,10 @@ from torchbenchmark.tasks import OTHER
 
 class Model(BenchmarkModel):
     task = OTHER.OTHER_TASKS
-    # batch size in the traditional sense doesn't apply to this maml model.
-    # Instead, there is a task number (32 in this case) and K-shot
-    # (5 in this case) and these were chosen to be representative of
-    # the training done in the original MAML paper
-    # (https://arxiv.org/pdf/1703.03400.pdf)
-    #
-    # The goal of MAML is to train a model in a way that if one brings along
-    # a new task and K data points, then the model generalizes well on the
-    # test set for that task.
-    #
-    # The task number (also known as the meta-batch size) is the number of
-    # independent tasks the model gets trained on.
-    # K-shot means that each task only sees K data points.
-    #
-    # We've set the following variables to be equal to the task number.
-    DEFAULT_TRAIN_BSIZE = 5
-    DEFAULT_EVAL_BSIZE = 5
-    ALLOW_CUSTOMIZE_BSIZE = False
-
-    # TODO: There _should_ be a way to plug in an optim here, but this
-    # can be a next step. For now, the optim is not customizable.
-    CANNOT_SET_CUSTOM_OPTIMIZER = True
-
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, device=None, jit=False):
+        super().__init__()
+        self.device = device
+        self.jit = jit
 
         n_way = 5
         net = nn.Sequential(
@@ -77,18 +55,25 @@ class Model(BenchmarkModel):
         root = str(Path(__file__).parent)
         self.meta_inputs = torch.load(f'{root}/batch.pt')
         self.meta_inputs = tuple([torch.from_numpy(i).to(self.device) for i in self.meta_inputs])
+
         self.example_inputs = (self.meta_inputs[0][0],)
 
     def get_module(self):
+        if self.jit:
+            raise NotImplementedError()
+
         return self.model, self.example_inputs
 
-    def train(self):
+    def train(self, niter=3):
+        if self.jit:
+            raise NotImplementedError()
+
         net, _ = self.get_module()
         net.train()
         x_spt, y_spt, x_qry, y_qry = self.meta_inputs
         meta_opt = optim.Adam(net.parameters(), lr=1e-3)
 
-        if True:
+        for _ in range(niter):
             task_num, setsz, c_, h, w = x_spt.size()
             querysz = x_qry.size(1)
 
@@ -111,9 +96,20 @@ class Model(BenchmarkModel):
 
             meta_opt.step()
 
-    def eval(self) -> Tuple[torch.Tensor]:
+    def eval(self, niter=1):
+        if self.jit:
+            raise NotImplementedError()
+
         model, (example_input,) = self.get_module()
         model.eval()
         with torch.no_grad():
-            out = model(example_input)
-        return (out, )
+            for i in range(niter):
+                model(example_input)
+
+
+if __name__ == "__main__":
+    m = Model(device="cuda", jit=False)
+    module, example_inputs = m.get_module()
+    module(*example_inputs)
+    m.train(niter=1)
+    m.eval(niter=1)

@@ -16,7 +16,7 @@ class Model(torch.nn.Module):
         self.ArbTimeFlowIntrp = model.UNet(20, 5).to(device)
         self.trainFlowBackWarp = model.backWarp(352, 352, device)
 
-        vgg16 = torchvision.models.vgg16(weights=torchvision.models.VGG16_Weights.IMAGENET1K_V1)
+        vgg16 = torchvision.models.vgg16(pretrained=True)
         vgg16_conv_4_3 = nn.Sequential(*list(vgg16.children())[0][:22])
         vgg16_conv_4_3.to(device)
         for param in vgg16_conv_4_3.parameters():
@@ -31,7 +31,7 @@ class Model(torch.nn.Module):
         F_0_1 = flowOut[:,:2,:,:]
         F_1_0 = flowOut[:,2:,:,:]
         
-        fCoeff = model.getFlowCoeff(trainFrameIndex, I0.device, I0.dtype)
+        fCoeff = model.getFlowCoeff(trainFrameIndex, I0.device)
         
         # Calculate intermediate flows
         F_t_0 = fCoeff[0] * F_0_1 + fCoeff[1] * F_1_0
@@ -54,7 +54,7 @@ class Model(torch.nn.Module):
         g_I0_F_t_0_f = self.trainFlowBackWarp(I0, F_t_0_f)
         g_I1_F_t_1_f = self.trainFlowBackWarp(I1, F_t_1_f)
         
-        wCoeff = model.getWarpCoeff(trainFrameIndex, I0.device, I0.dtype)
+        wCoeff = model.getWarpCoeff(trainFrameIndex, I0.device)
         
         # Calculate final intermediate frame 
         Ft_p = (wCoeff[0] * V_t_0 * g_I0_F_t_0_f + wCoeff[1] * V_t_1 * g_I1_F_t_1_f) / (wCoeff[0] * V_t_0 + wCoeff[1] * V_t_1)

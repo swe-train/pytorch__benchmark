@@ -5,8 +5,6 @@ from argparse import Namespace
 from .text import symbols
 from pathlib import Path
 from ...util.model import BenchmarkModel
-from typing import Tuple
-from contextlib import nullcontext
 from torchbenchmark.tasks import SPEECH
 
 
@@ -15,27 +13,28 @@ class Model(BenchmarkModel):
 
     # Training batch size comes from the source code:
     # Source: https://github.com/NVIDIA/tacotron2/blob/bb6761349354ee914909a42208e4820929612069/hparams.py#L84
-    DEFAULT_TRAIN_BSIZE = 64
-    DEFAULT_EVAL_BSIZE = 64
-    # Tacotron2 CUDA inference test uses amp precision
-    DEFAULT_EVAL_CUDA_PRECISION = "amp"
-
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
-
-        if device == 'cpu':
+    def __init__(self, device=None, jit=False, train_bs=64, eval_bs=64):
+        super().__init__()
+        """ Required """
+        self.device = device
+        self.jit = jit
+        if device == 'cpu' or jit:
             # TODO - currently load_model assumes cuda
-            raise NotImplementedError("Tacotron2 doesn't support CPU because load_model assumes CUDA.")
+            return
 
-        self.hparams = self.create_hparams(batch_size=self.batch_size)
-        self.model = load_model(self.hparams).to(device=device)
-        self.optimizer = torch.optim.Adam(self.model.parameters(),
-                                          lr=self.hparams.learning_rate,
-                                          weight_decay=self.hparams.weight_decay)
+        self.train_hparams = self.create_hparams(batch_size=train_bs)
+        self.eval_hparams = self.create_hparams(batch_size=eval_bs)
+        self.train_model = load_model(self.train_hparams).to(device=device)
+        self.eval_model = load_model(self.eval_hparams).to(device=device)
+        self.train_optimizer = torch.optim.Adam(self.train_model.parameters(),
+                                                lr=self.train_hparams.learning_rate,
+                                                weight_decay=self.train_hparams.weight_decay)
+        self.eval_optimizer = torch.optim.Adam(self.eval_model.parameters(),
+                                               lr=self.eval_hparams.learning_rate,
+                                               weight_decay=self.eval_hparams.weight_decay)
         self.criterion = Tacotron2Loss().to(device=device)
-        loader, valset, collate_fn = prepare_dataloaders(self.hparams)
-        self.example_inputs, self.target = self.model.parse_batch(next(iter(loader)), device=self.device)
-        self.amp_context = nullcontext
+        train_loader, valset, collate_fn = prepare_dataloaders(self.train_hparams)
+        self.example_input, self.target = self.train_model.parse_batch(next(iter(train_loader)), device=self.device)
 
     # Parameters were obtained from the source code.
     # Source: https://github.com/NVIDIA/tacotron2/blob/bb6761349354ee914909a42208e4820929612069/hparams.py#L5
@@ -48,6 +47,7 @@ class Model(BenchmarkModel):
             ################################
             'epochs': 2,  # Reduced in TorchBench to shorten number of train iterations.
             'iters_per_checkpoint': 1000,
+            'seed': 1234,
             'dynamic_loss_scaling': True,
             'fp16_run': False,
             'distributed_run': False,
@@ -123,19 +123,45 @@ class Model(BenchmarkModel):
         return hparams
 
     def get_module(self):
-        return self.model, (self.example_inputs,)
+        if self.device == 'cuda':
+            raise NotImplementedError('CUDA disabled due to CUDA out of memory on CI GPU')
+        if self.device == 'cpu':
+            raise NotImplementedError('CPU not supported')
+        if self.jit:
+            raise NotImplementedError('JIT not supported')
+        return self.train_model, (self.example_input,)
 
-    def train(self):
-        self.model.train()
-        self.model.zero_grad()
-        y_pred = self.model(self.example_inputs)
+    def train(self, niterations=1):
+        if self.device == 'cuda':
+            raise NotImplementedError('CUDA disabled due to CUDA out of memory on CI GPU')
+        if self.device == 'cpu':
+            raise NotImplementedError("Disabled due to excessively slow runtime - see GH Issue #100")
+        if self.jit:
+            raise NotImplementedError('JIT not supported')
+        self.train_model.train()
+        for _ in range(niterations):
+            self.train_model.zero_grad()
+            y_pred = self.train_model(self.example_input)
 
-        loss = self.criterion(y_pred, self.target)
-        loss.backward()
-        self.optimizer.step()
+            loss = self.criterion(y_pred, self.target)
+            loss.backward()
+            self.train_optimizer.step()
 
-    def eval(self) -> Tuple[torch.Tensor]:
-        self.model.eval()
-        with self.amp_context():
-            out = self.model(self.example_inputs)
-        return out
+    def eval(self, niterations=1):
+        if self.device == 'cuda':
+            raise NotImplementedError('CUDA disabled due to CUDA out of memory on CI GPU')
+        if self.device == 'cpu':
+            raise NotImplementedError('CPU not supported')
+        if self.jit:
+            raise NotImplementedError('JIT not supported')
+        self.eval_model.eval()
+        for _ in range(niterations):
+            self.eval_model(self.example_input)
+
+
+if __name__ == '__main__':
+    m = Model(device='cuda', jit=False)
+    model, example_inputs = m.get_module()
+    model(*example_inputs)
+    m.train()
+    m.eval()

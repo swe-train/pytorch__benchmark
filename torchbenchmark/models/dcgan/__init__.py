@@ -6,7 +6,6 @@ from __future__ import print_function
 import argparse
 import os
 import random
-from typing import Any, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -25,6 +24,12 @@ from torchbenchmark.tasks import COMPUTER_VISION
 
 class DCGAN:
  def __init__(self, bench):
+
+  # Set random seed for reproducibility
+  self.manualSeed = 999
+
+  random.seed(self.manualSeed)
+  torch.manual_seed(self.manualSeed)
 
   # Spatial size of training images. All images will be resized to this
   #   size using a transformer.
@@ -92,6 +97,8 @@ class Generator(nn.Module):
             # state size. (dcgan.nc) x 64 x 64
         )
 
+        self.jt = None
+        self.jitshape = None
         self.debug_print = False
 
     def forward(self, input):
@@ -129,20 +136,24 @@ class Discriminator(nn.Module):
             nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False),
             nn.Sigmoid()
         )
+        self.jt = None
+        self.jitshape = None
 
     def forward(self, input):
       return self.main(input)
 
 class Model(BenchmarkModel):
     task = COMPUTER_VISION.GENERATION
-    DEFAULT_TRAIN_BSIZE = 32
-    DEFAULT_EVAL_BSIZE = 256
 
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, device=None, jit=False, eval_bs=256, train_bs=32):
+        super().__init__()
+
         self.debug_print = False
 
+        self.device = device
         self.root = str(Path(__file__).parent)
+        self.jit = jit
+
         self.dcgan = DCGAN(self)
 
         dcgan = self.dcgan
@@ -159,7 +170,7 @@ class Model(BenchmarkModel):
 
         # Handle multi-gpu if desired
         if (dcgan.device == 'cuda') and (ngpu > 1):
-            self.netG = nn.DataParallel(self.netG, list(range(ngpu)))
+            self.netG = nn.DataParallel(netG, list(range(ngpu)))
 
         # Apply the weights_init function to randomly initialize all weights
         #  to mean=0, stdev=0.2.
@@ -170,19 +181,19 @@ class Model(BenchmarkModel):
             print(self.netG)
 
         # Create the Discriminator
-        netD = Discriminator(dcgan).to(device)
+        self.netD = Discriminator(dcgan).to(device)
 
         # Handle multi-gpu if desired
         if (dcgan.device == 'cuda') and (ngpu > 1):
-            netD = nn.DataParallel(self.netD, list(range(ngpu)))
+            self.netD = nn.DataParallel(netD, list(range(ngpu)))
 
         # Apply the weights_init function to randomly initialize all weights
         #  to mean=0, stdev=0.2.
-        netD.apply(weights_init)
+        self.netD.apply(weights_init)
         
         if self.debug_print:
             # Print the model
-            print(netD)
+            print(self.netD)
 
         # Initialize BCELoss function
         self.criterion = nn.BCELoss()
@@ -195,37 +206,46 @@ class Model(BenchmarkModel):
         self.real_label = 1.
         self.fake_label = 0.
 
-        # Random values as surrogate for batch of photos
-        self.exmaple_inputs = torch.randn(self.batch_size, 3, 64, 64, device=self.device)
-        self.model = netD
-        if test == "train":
-            # Setup Adam optimizers for both G and D
-            self.optimizerD = optim.Adam(netD.parameters(), lr=lr, betas=(beta1, 0.999))
-            self.optimizerG = optim.Adam(self.netG.parameters(), lr=lr, betas=(beta1, 0.999))
-        elif test == "eval":
-            # inference would just run descriminator so thats what we'll do too.
-            self.inference_just_descriminator = True
-            if False == self.inference_just_descriminator:
-                self.eval_noise = torch.randn(self.batch_size, nz, 1, 1, device=self.device)
+        # Setup Adam optimizers for both G and D
+        self.optimizerD = optim.Adam(self.netD.parameters(), lr=lr, betas=(beta1, 0.999))
+        self.optimizerG = optim.Adam(self.netG.parameters(), lr=lr, betas=(beta1, 0.999))
 
-    def jit_callback(self):
-        self.model = torch.jit.trace(self.model,(self.exmaple_inputs,))
-        if self.test == "eval" and False == self.inference_just_descriminator:
-            self.netG = torch.jit.trace(self.netG,(self.eval_noise,))
+        # Train batch size
+        self.train_b_size = train_bs
+
+        # inference would just run descriminator so thats what we'll do too.
+        self.inference_just_descriminator = True
+
+        # eval batch size
+        self.eval_b_size = eval_bs
+
+        self.eval_fake = torch.randn(self.eval_b_size, 3, 64, 64, device=self.device)
+
+        if self.jit:
+            self.netD = torch.jit.trace(self.netD,(self.eval_fake,))
+
+        if False == self.inference_just_descriminator:
+            self.eval_noise = torch.randn(self.eval_b_size, nz, 1, 1, device=self.device)
+            if self.jit:
+              self.netG = torch.jit.trace(self.netG,(self.eval_noise,))
 
     def get_module(self):
-        return self.model, (self.exmaple_inputs,)
+        return self.netD, (self.eval_fake,)
 
-    def eval(self):
-       if False == self.inference_just_descriminator:
-           # Generate fake image batch with G
-           self.eval_fake = self.netG(self.eval_noise)
+    def eval(self, niter=1):
 
-       # Since we just updated D, perform another forward pass of all-fake batch through D
-       output = self.model(self.exmaple_inputs).view(-1)
-       return (output, )
+        for _ in range(niter):
 
-    def train(self):
+            if False == self.inference_just_descriminator:
+              # Generate fake image batch with G
+              self.eval_fake = self.netG(self.eval_noise)
+
+            # Since we just updated D, perform another forward pass of all-fake batch through D
+            output = self.netD(self.eval_fake).view(-1)
+
+        return
+
+    def train(self, niter=1):
 
         # Training Loop
 
@@ -237,13 +257,13 @@ class Model(BenchmarkModel):
         device = dcgan.device
 
         num_epochs = dcgan.num_epochs
-        num_train_batch = 1
+        num_train_batch = niter
 
         lr = dcgan.lr
         nz = dcgan.nz
         beta1 = dcgan.beta1
 
-        netD = self.model
+        netD = self.netD
         netG = self.netG
 
         criterion = self.criterion
@@ -253,7 +273,8 @@ class Model(BenchmarkModel):
         real_label = self.real_label
         fake_label = self.fake_label
 
-        benchmark_pic = self.exmaple_inputs
+        # Random values as surrogate for batch of photos
+        benchmark_pic = torch.randn(self.train_b_size, 3, 64, 64, device=self.device)
 
         # For each epoch
         for epoch in range(num_epochs):
@@ -311,13 +332,3 @@ class Model(BenchmarkModel):
                 D_G_z2 = output.mean().item()
                 # Update G
                 optimizerG.step()
-
-
-    # This model has TWO optimizers! Try returning both.
-    def get_optimizer(self):
-        return (self.optimizerD, self.optimizerG)
-    
-    # `optimizer` has type Tuple but we want this function to override the parent's
-    # so keep the name and schema the same.
-    def set_optimizer(self, optimizer) -> None:
-        self.optimizerD, self.optimizerG = optimizer

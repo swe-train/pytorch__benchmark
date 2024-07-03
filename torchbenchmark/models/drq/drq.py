@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import copy
 import math
 
-from . import drqutils
+from . import utils
 
 class Encoder(nn.Module):
     """Convolutional encoder for image-based observations."""
@@ -43,9 +43,7 @@ class Encoder(nn.Module):
             conv = torch.relu(self.convs[i](conv))
             self.outputs['conv%s' % (i + 1)] = conv
 
-        # Changed view to reshape here to support channels last input
-        # TODO: upstream this change to https://github.com/denisyarats/drq/blob/master/drq.py#L48
-        h = conv.reshape(conv.size(0), -1)
+        h = conv.view(conv.size(0), -1)
         return h
 
     def forward(self, obs, detach=False):
@@ -65,7 +63,7 @@ class Encoder(nn.Module):
     def copy_conv_weights_from(self, source):
         """Tie convolutional layers"""
         for i in range(self.num_layers):
-            drqutils.tie_weights(src=source.convs[i], trg=self.convs[i])
+            utils.tie_weights(src=source.convs[i], trg=self.convs[i])
 
     def log(self, logger, step):
         pass
@@ -79,11 +77,11 @@ class Actor(nn.Module):
         self.encoder = Encoder(*encoder_cfg)
 
         self.log_std_bounds = log_std_bounds
-        self.trunk = drqutils.mlp(self.encoder.feature_dim, hidden_dim,
+        self.trunk = utils.mlp(self.encoder.feature_dim, hidden_dim,
                                2 * action_shape[0], hidden_depth)
 
         self.outputs = dict()
-        self.apply(drqutils.weight_init)
+        self.apply(utils.weight_init)
 
     def forward(self, obs, detach_encoder=False):
         obs = self.encoder(obs, detach=detach_encoder)
@@ -100,7 +98,7 @@ class Actor(nn.Module):
         self.outputs['mu'] = mu
         self.outputs['std'] = std
 
-        dist = drqutils.SquashedNormal(mu, std)
+        dist = utils.SquashedNormal(mu, std)
         return dist
 
     def log(self, logger, step):
@@ -113,13 +111,13 @@ class Critic(nn.Module):
 
         self.encoder = Encoder(*encoder_cfg)
 
-        self.Q1 = drqutils.mlp(self.encoder.feature_dim + action_shape[0],
+        self.Q1 = utils.mlp(self.encoder.feature_dim + action_shape[0],
                             hidden_dim, 1, hidden_depth)
-        self.Q2 = drqutils.mlp(self.encoder.feature_dim + action_shape[0],
+        self.Q2 = utils.mlp(self.encoder.feature_dim + action_shape[0],
                             hidden_dim, 1, hidden_depth)
 
         self.outputs = dict()
-        self.apply(drqutils.weight_init)
+        self.apply(utils.weight_init)
 
     def forward(self, obs, action, detach_encoder=False):
         assert obs.size(0) == action.size(0)
@@ -197,7 +195,7 @@ class DRQAgent(object):
         action = dist.sample() if sample else dist.mean
         action = action.clamp(*self.action_range)
         assert action.ndim == 2 and action.shape[0] == 1
-        return drqutils.to_np(action[0])
+        return utils.to_np(action[0])
 
     def update_critic(self, obs, obs_aug, action, reward, next_obs,
                       next_obs_aug, not_done, logger, step):
@@ -277,5 +275,5 @@ class DRQAgent(object):
             self.update_actor_and_alpha(obs, logger, step)
 
         if step % self.critic_target_update_frequency == 0:
-            drqutils.soft_update_params(self.critic, self.critic_target,
+            utils.soft_update_params(self.critic, self.critic_target,
                                      self.critic_tau)

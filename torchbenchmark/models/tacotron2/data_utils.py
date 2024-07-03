@@ -4,7 +4,7 @@ import torch
 import torch.utils.data
 
 from .layers import TacotronSTFT
-from .tacotron2_utils import load_wav_to_torch, load_filepaths_and_text
+from .utils import load_wav_to_torch, load_filepaths_and_text
 from .text import text_to_sequence
 
 
@@ -24,6 +24,7 @@ class TextMelLoader(torch.utils.data.Dataset):
             hparams.filter_length, hparams.hop_length, hparams.win_length,
             hparams.n_mel_channels, hparams.sampling_rate, hparams.mel_fmin,
             hparams.mel_fmax)
+        random.seed(hparams.seed)
         random.shuffle(self.audiopaths_and_text)
 
     def get_mel_text_pair(self, audiopath_and_text):

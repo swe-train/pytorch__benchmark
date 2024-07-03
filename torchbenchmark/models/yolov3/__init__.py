@@ -6,15 +6,16 @@ import argparse
 import torch
 import os
 import numpy as np
-from contextlib import nullcontext
 
+random.seed(1337)
+torch.manual_seed(1337)
+np.random.seed(1337)
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = True
 
 from shlex import split
 from .yolo_train import prepare_training_loop
 from . import yolo_train
-from typing import Tuple
 
 from .yolo_models import *  # set ONNX_EXPORT in models.py
 from .yolo_utils.datasets import *
@@ -30,29 +31,22 @@ class Model(BenchmarkModel):
     task = COMPUTER_VISION.SEGMENTATION
     # Original train batch size: 16
     # Source: https://github.com/ultralytics/yolov3/blob/master/train.py#L447
-    DEFAULT_TRAIN_BSIZE = 16
-    DEFAULT_EVAL_BSIZE = 8
-    # yolov3 CUDA inference test uses amp precision
-    DEFAULT_EVAL_CUDA_PRECISION = "amp"
-
-    # TODO: yolov3 does use an optimizer, but it is inaccessible from this file.
-    CANNOT_SET_CUSTOM_OPTIMIZER = True
-
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, device=None, jit=False, train_bs=16, eval_bs=16):
+        super().__init__()
+        self.device = device
+        self.jit = jit
         # run just 1 epoch
         self.num_epochs = 1
         self.train_num_batch = 1
         self.prefetch = True
-        if test == "train":
-            train_args = split(f"--data {DATA_DIR}/coco128.data --img 416 --batch {self.batch_size} --nosave --notest \
-                                --epochs {self.num_epochs} --device {self.device_str} --weights '' \
-                                --train-num-batch {self.train_num_batch} \
-                                --prefetch")
-            self.training_loop, self.model, self.example_inputs = prepare_training_loop(train_args)
-        elif test == "eval":
-            self.model, self.example_inputs = self.prep_eval()
-        self.amp_context = nullcontext
+        self.train_bs = train_bs
+        self.eval_bs = eval_bs
+        train_args = split(f"--data {DATA_DIR}/coco128.data --img 416 --batch {train_bs} --nosave --notest \
+                             --epochs {self.num_epochs} --device {self.device_str} --weights '' \
+                             --train-num-batch {self.train_num_batch} \
+                             --prefetch")
+        self.training_loop = prepare_training_loop(train_args)
+        self.eval_model, self.eval_example_input = self.prep_eval()
 
     def prep_eval(self):
         parser = argparse.ArgumentParser()
@@ -78,25 +72,29 @@ class Model(BenchmarkModel):
         opt.names = check_file(opt.names)  # check file
         model = Darknet(opt.cfg, opt.img_size)
         model.to(opt.device).eval()
-        example_inputs = (torch.rand(self.batch_size, 3, 384, 512).to(self.device),)
-        return model, example_inputs
+        example_input = (torch.rand(self.eval_bs, 3, 384, 512).to(self.device),)
+        return model, example_input
 
     def get_module(self):
-        return self.model, self.example_inputs
+        if self.jit:
+            raise NotImplementedError()
+        return self.eval_model, self.eval_example_input
 
-    def train(self):
+    def train(self, niter=1):
         # the training process is not patched to use scripted models
-        return self.training_loop()
+        if self.jit:
+            raise NotImplementedError()
+        if self.device == 'cpu':
+            raise NotImplementedError("Disabled due to excessively slow runtime - see GH Issue #100")
+        return self.training_loop(niter)
 
-    def eval(self) -> Tuple[torch.Tensor]:
+    def eval(self, niter=1):
         model, example_inputs = self.get_module()
-        with self.amp_context():
-            out = model(*example_inputs, augment=False)
-        pred = out[0]
-        # Apply NMS
-        pred = non_max_suppression(pred, 0.3, 0.6,
+        for i in range(niter):
+            pred = model(*example_inputs, augment=False)[0]
+            # Apply NMS
+            pred = non_max_suppression(pred, 0.3, 0.6,
                                     multi_label=False, classes=None, agnostic=False)
-        return (out[0],) + out[1]
 
     @property
     def device_str(self):

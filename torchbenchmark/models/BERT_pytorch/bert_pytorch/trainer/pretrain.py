@@ -6,6 +6,8 @@ from torch.utils.data import DataLoader
 from ..model import BERTLM, BERT
 from .optim_schedule import ScheduledOptim
 
+import tqdm
+
 
 class BERTTrainer:
     """
@@ -54,20 +56,12 @@ class BERTTrainer:
         # Setting the Adam optimizer with hyper-param
         self.optim = Adam(self.model.parameters(), lr=lr, betas=betas, weight_decay=weight_decay)
         self.optim_schedule = ScheduledOptim(self.optim, self.bert.hidden, n_warmup_steps=warmup_steps)
-        self.warmup_steps = warmup_steps
 
         # Using Negative Log Likelihood Loss function for predicting the masked_token
         self.criterion = nn.NLLLoss(ignore_index=0)
 
         self.log_freq = log_freq
         self.debug = debug
-
-    def get_optimizer(self):
-        return self.optim
-    
-    def set_optimizer(self, optimizer: torch.optim.Optimizer):
-        self.optim = optimizer
-        self.optim_schedule = ScheduledOptim(optimizer, self.bert.hidden, n_warmup_steps=self.warmup_steps)
 
     def train(self, epoch):
         self.iteration(epoch, self.train_data)
@@ -88,7 +82,11 @@ class BERTTrainer:
         """
         str_code = "train" if train else "test"
 
-        data_iter = enumerate(data_loader)
+        # Setting the tqdm progress bar
+        data_iter = tqdm.tqdm(enumerate(data_loader),
+                              desc="EP_%s:%d" % (str_code, epoch),
+                              total=len(data_loader),
+                              bar_format="{l_bar}{r_bar}")
 
         avg_loss = 0.0
         total_correct = 0

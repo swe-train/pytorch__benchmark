@@ -1,11 +1,9 @@
 import torch
 import torch.optim as optim
 import torch.nn as nn
-import torch.utils.data as data
 import torchvision.models as models
+from opacus.utils.module_modification import convert_batchnorm_modules
 from opacus import PrivacyEngine
-from opacus.validators.module_validator import ModuleValidator
-from typing import Tuple
 
 from ...util.model import BenchmarkModel
 from torchbenchmark.tasks import OTHER
@@ -13,64 +11,50 @@ from torchbenchmark.tasks import OTHER
 
 class Model(BenchmarkModel):
     task = OTHER.OTHER_TASKS
-    DEFAULT_TRAIN_BSIZE = 64
-    DEFAULT_EVAL_BSIZE = 64
-
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        # disable torchdynamo-fx2trt because it never terminates
-        if "--torchdynamo" in extra_args and "fx2trt" in extra_args:
-            raise NotImplementedError("TorchDynamo Fx2trt is not supported because of hanging issue. "
-                                      "See: https://github.com/facebookresearch/torchdynamo/issues/109")
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, device=None, jit=False):
+        super().__init__()
+        self.device = device
+        self.jit = jit
 
         self.model = models.resnet18(num_classes=10)
-        self.model = ModuleValidator.fix(self.model)
+        self.model = convert_batchnorm_modules(self.model)
         self.model = self.model.to(device)
 
-        # Cifar10 images are 32x32 and have 10 classes
         self.example_inputs = (
-            torch.randn((self.batch_size, 3, 32, 32), device=self.device),
+            torch.randn((64, 3, 32, 32), device=self.device),
         )
-        self.example_target = torch.randint(0, 10, (self.batch_size,), device=self.device)
-        dataset = data.TensorDataset(self.example_inputs[0], self.example_target)
-        self.dummy_loader = data.DataLoader(dataset, batch_size=self.batch_size)
-        self.noise_multiplier: float=1.0
-        self.max_grad_norm: float=1.0
-        self.poisson_sampling: bool=False
+        self.example_target = torch.randint(0, 10, (64,), device=self.device)
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
         self.criterion = nn.CrossEntropyLoss()
 
-        self.privacy_engine = PrivacyEngine()
-        self.model, self.optimizer, _ = self.privacy_engine.make_private(
-            module=self.model,
-            optimizer=self.optimizer,
-            data_loader=self.dummy_loader,
-            noise_multiplier=self.noise_multiplier,
-            max_grad_norm=self.max_grad_norm,
-            poisson_sampling=self.poisson_sampling,
-        )
-
-    def get_module(self):
-        return self.model, self.example_inputs
-
-    def get_optimizer(self):
-        return self.optimizer
-
-    def set_optimizer(self, optimizer) -> None:
-        self.optimizer = optimizer
-        self.model, self.optimizer, _ = self.privacy_engine.make_private(
-            module=self.model,
-            optimizer=self.optimizer,
-            data_loader=self.dummy_loader,
+        # This is supposed to equal the number of data points.
+        # It is only to compute stats so dwai about the value.
+        sample_size = 64 * 100
+        clipping = {"clip_per_layer": False, "enable_stat": False}
+        self.privacy_engine = PrivacyEngine(
+            self.model,
+            batch_size=64,
+            sample_size=sample_size,
+            alphas=[1 + x / 10.0 for x in range(1, 100)] + list(range(12, 64)),
             noise_multiplier=1.0,
             max_grad_norm=1.0,
-            poisson_sampling=False,
+            secure_rng=False,
+            **clipping,
         )
+        self.privacy_engine.attach(self.optimizer)
+
+    def get_module(self):
+        if self.jit:
+            raise NotImplementedError()
+
+        return self.model, self.example_inputs
 
     def train(self):
-        model = self.model
-        (images, ) = self.example_inputs
+        if self.jit:
+            raise NotImplementedError()
+
+        model, (images,) = self.get_module()
         model.train()
         targets = self.example_target
 
@@ -80,11 +64,20 @@ class Model(BenchmarkModel):
         self.optimizer.step()
         self.optimizer.zero_grad()
 
-    def eval(self) -> Tuple[torch.Tensor]:
-        model = self.model
-        (images, ) = self.example_inputs
+    def eval(self):
+        if self.jit:
+            raise NotImplementedError()
+
+        model, (images,) = self.get_module()
         model.eval()
         targets = self.example_target
         with torch.no_grad():
-            out = model(images)
-        return (out, )
+            model(images)
+
+
+if __name__ == "__main__":
+    m = Model(device="cuda", jit=False)
+    module, example_inputs = m.get_module()
+    module(*example_inputs)
+    m.train()
+    m.eval()

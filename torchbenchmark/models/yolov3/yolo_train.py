@@ -12,9 +12,6 @@ from .yolo_utils.utils import *
 from .yolo_utils.parse_config import parse_data_cfg
 from pathlib import Path
 
-def print(*args):
-    pass
-
 def _prefetch_loader(loader, size, fields=[], collate_fn=lambda x: x):
     result = []
     for index, item in enumerate(loader):
@@ -27,7 +24,12 @@ def _prefetch_loader(loader, size, fields=[], collate_fn=lambda x: x):
     return result
 
 def prepare_training_loop(args):
-    mixed_precision = False
+    mixed_precision = True
+    try:  # Mixed precision training https://github.com/NVIDIA/apex
+        from apex import amp
+    except:
+        print('Apex recommended for faster mixed precision training: https://github.com/NVIDIA/apex')
+        mixed_precision = False  # not installed
 
     wdir = 'weights' + os.sep  # weights dir
     last = wdir + 'last.pt'
@@ -87,8 +89,7 @@ def prepare_training_loop(args):
         img_size = imgsz_max  # initialize with max size
 
         # Configure run
-        # do not init seeds because it is already initialized in __init__.py
-        # init_seeds(0)
+        init_seeds(0)
         data_dict = parse_data_cfg(data)
         train_path = os.path.dirname(__file__) + '/' + data_dict['train']
         test_path = os.path.dirname(__file__) + '/' + data_dict['valid']
@@ -146,9 +147,9 @@ def prepare_training_loop(args):
                 best_fitness = ckpt['best_fitness']
 
             # load results
-            # if ckpt.get('training_results') is not None:
-            #     with open(results_file, 'w') as file:
-            #         file.write(ckpt['training_results'])  # write results.txt
+            if ckpt.get('training_results') is not None:
+                with open(results_file, 'w') as file:
+                    file.write(ckpt['training_results'])  # write results.txt
 
             # epochs
             start_epoch = ckpt['epoch'] + 1
@@ -213,8 +214,6 @@ def prepare_training_loop(args):
         # Dataloader
         batch_size = min(batch_size, len(dataset))
         nw = min([os.cpu_count(), batch_size if batch_size > 1 else 0, 8])  # number of workers
-        # load with single process
-        nw = 0
         dataloader = torch.utils.data.DataLoader(dataset,
                                                 batch_size=batch_size,
                                                 num_workers=nw,
@@ -232,9 +231,10 @@ def prepare_training_loop(args):
                                                 num_workers=nw,
                                                 pin_memory=True,
                                                 collate_fn=dataset.collate_fn)
+
         # TorchBench: prefetch the dataloader
         if opt.prefetch:
-            dataloader = _prefetch_loader(dataloader, size=opt.train_num_batch*batch_size,
+            dataloader = _prefetch_loader(dataloader, size=opt.train_num_batch*batch_size, 
                                           fields=[0, 1],
                                           collate_fn=lambda x: x.to(device) if isinstance(x, torch.Tensor) else x)
 
@@ -247,7 +247,7 @@ def prepare_training_loop(args):
         # Model EMA
         ema = torch_utils.ModelEMA(model)
 
-        def train_loop(epochs=1):
+        def train_loop(epochs):
             epoch = 0
             nonlocal img_size, best_fitness
             # Start training
@@ -333,10 +333,9 @@ def prepare_training_loop(args):
                     # Plot
                     if ni < 1:
                         f = 'train_batch%g.jpg' % i  # filename
-                        # TorchBench: do not write result jpg
-                        # res = plot_images(images=imgs, targets=targets, paths=paths, fname=f)
-                        # if tb_writer:
-                            # tb_writer.add_image(f, res, dataformats='HWC', global_step=epoch)
+                        res = plot_images(images=imgs, targets=targets, paths=paths, fname=f)
+                        if tb_writer:
+                            tb_writer.add_image(f, res, dataformats='HWC', global_step=epoch)
                             # tb_writer.add_graph(model, imgs)  # add model to tensorboard
 
                     # end batch ------------------------------------------------------------------------------------------------
@@ -359,8 +358,8 @@ def prepare_training_loop(args):
                 #                             multi_label=ni > n_burn)
 
                 # Write
-                # with open(results_file, 'a') as f:
-                #     f.write(s + '%10.3g' * 7 % results + '\n')  # P, R, mAP, F1, test_losses=(GIoU, obj, cls)
+                with open(results_file, 'a') as f:
+                    f.write(s + '%10.3g' * 7 % results + '\n')  # P, R, mAP, F1, test_losses=(GIoU, obj, cls)
                 if len(opt.name) and opt.bucket:
                     os.system('gsutil cp results.txt gs://%s/results/results%s.txt' % (opt.bucket, opt.name))
 
@@ -379,8 +378,6 @@ def prepare_training_loop(args):
 
                 # Save model
                 save = (not opt.nosave) or (final_epoch and not opt.evolve)
-                # TorchBench: do not save the result
-                save = False
                 if save:
                     with open(results_file, 'r') as f:  # create checkpoint
                         ckpt = {'epoch': epoch,
@@ -413,10 +410,9 @@ def prepare_training_loop(args):
             #     plot_results()  # save as results.png
             # print('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
             # dist.destroy_process_group() if torch.cuda.device_count() > 1 else None
-            # torchbench: disable empty cache
-            # torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
             return results
-        return train_loop, model, dataloader
+        return train_loop
 
     root = str(Path(__file__).parent.resolve())
     parser = argparse.ArgumentParser()
