@@ -12,11 +12,9 @@ from torchbenchmark.tasks import COMPUTER_VISION
 #       USE `gen_torchvision_benchmarks.py`
 #
 #######################################################
-
 class Model(BenchmarkModel):
     task = COMPUTER_VISION.CLASSIFICATION
     optimized_for_inference = True
-
     def __init__(self, device=None, jit=False):
         super().__init__()
         self.device = device
@@ -63,6 +61,7 @@ class Model(BenchmarkModel):
         example_inputs = example_inputs[0]
         for i in range(niter):
             model(example_inputs)
+
 
 if __name__ == "__main__":
     m = Model(device="cuda", jit=True)

@@ -55,6 +55,7 @@ class Model(BenchmarkModel):
             for _ in range(niter):
                 out = self.model(**self.eval_inputs)
 
+
 if __name__ == "__main__":
     import time
     m = Model(device="cuda")
