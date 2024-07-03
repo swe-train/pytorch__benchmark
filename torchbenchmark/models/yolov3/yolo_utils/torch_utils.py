@@ -9,11 +9,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-
-def print(*args):
-    pass  # do nothing
-
-
 def init_seeds(seed=0):
     torch.manual_seed(seed)
     np.random.seed(seed)

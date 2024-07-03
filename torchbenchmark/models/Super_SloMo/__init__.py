@@ -5,7 +5,6 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.transforms as transforms
 import random
-from typing import Tuple
 import numpy as np
 
 from argparse import Namespace
@@ -13,6 +12,9 @@ from pathlib import Path
 from ...util.model import BenchmarkModel
 from torchbenchmark.tasks import COMPUTER_VISION
 
+torch.manual_seed(1337)
+random.seed(1337)
+np.random.seed(1337)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
@@ -30,21 +32,21 @@ class Model(BenchmarkModel):
     #    eval batch size: 10
     #    hardware platform: Nvidia GTX 1080 Ti
     # Source: https://github.com/avinashpaliwal/Super-SloMo/blob/master/train.ipynb
-    DEFAULT_TRAIN_BSIZE = 6
-    DEFAULT_EVAL_BSIZE = 10
+    def __init__(self, device=None, jit=False, train_bs=6, eval_bs=10):
+        super().__init__()
+        self.device = device
+        self.jit = jit
+        self.module = ModelWrapper(device)
 
-    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
-
-        self.model = ModelWrapper(device)
         root = str(Path(__file__).parent)
         self.args = args = Namespace(**{
             'dataset_root': f'{root}/dataset',
-            'batch_size': self.batch_size,
+            'train_batch_size': train_bs,
+            'eval_batch_size': eval_bs,
             'init_learning_rate': 0.0001,
         })
 
-        self.optimizer = optim.Adam(self.model.parameters(),
+        self.optimizer = optim.Adam(self.module.parameters(),
                                     lr=args.init_learning_rate)
 
         mean = [0.429, 0.431, 0.397]
@@ -55,28 +57,55 @@ class Model(BenchmarkModel):
 
         trainset = SuperSloMo(root=args.dataset_root + '/train',
                                          transform=transform, train=True)
-        loader = torch.utils.data.DataLoader(
+        trainloader = torch.utils.data.DataLoader(
             trainset,
-            batch_size=self.args.batch_size,
+            batch_size=self.args.train_batch_size,
+            shuffle=False)
+        evalloader = torch.utils.data.DataLoader(
+            trainset,
+            batch_size=self.args.eval_batch_size,
             shuffle=False)
 
-        data, frameIndex = next(iter(loader))
-        data = _prefetch(data, self.device)
-        self.example_inputs = frameIndex.to(self.device), *data
+        trainData, trainFrameIndex = next(iter(trainloader))
+        trainData = _prefetch(trainData, self.device)
+        self.example_inputs = trainFrameIndex.to(self.device), *trainData
+
+        evalData, evalFrameIndex = next(iter(evalloader))
+        evalData = _prefetch(evalData, self.device)
+        self.infer_example_inputs = evalFrameIndex.to(self.device), *evalData
+
+        if jit:
+            if hasattr(torch.jit, '_script_pdt'):
+                self.module = torch.jit._script_pdt(self.module, example_inputs=[self.example_inputs, ])
+            else:
+                self.module = torch.jit.script(self.module, example_inputs=[self.example_inputs, ])
 
     def get_module(self):
-        return self.model, self.example_inputs
+        return self.module, self.example_inputs
 
-    def eval(self, niter=1) -> Tuple[torch.Tensor]:
+    def eval(self, niter=1):
+        if self.device == 'cpu':
+            raise NotImplementedError("Disabled due to excessively slow runtime - see GH Issue #100")
+
         for _ in range(niter):
-            out = self.model(*self.example_inputs)
-        return out
+            self.module(*self.infer_example_inputs)
 
     def train(self, niter=1):
+        if self.device == 'cpu':
+            raise NotImplementedError("Disabled due to excessively slow runtime - see GH Issue #100")
+
         for _ in range(niter):
             self.optimizer.zero_grad()
 
-            Ft_p, loss = self.model(*self.example_inputs)
+            Ft_p, loss = self.module(*self.example_inputs)
 
             loss.backward()
             self.optimizer.step()
+
+
+if __name__ == '__main__':
+    m = Model(device='cuda', jit=False)
+    module, example_inputs = m.get_module()
+    module(*example_inputs)
+    m.train(niter=1)
+    m.eval(niter=1)

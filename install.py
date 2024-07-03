@@ -3,13 +3,12 @@ import subprocess
 import os
 import sys
 import tarfile
-from install_utils import TORCH_DEPS, proxy_suggestion, get_pkg_versions, _test_https
+from torchbenchmark import setup, _test_https, proxy_suggestion
 
 def git_lfs_checkout():
     tb_dir = os.path.dirname(os.path.realpath(__file__))
     try:
-        # forcefully install git-lfs to the repo
-        subprocess.check_call(['git', 'lfs', 'install', '--force'], stdout=subprocess.PIPE,
+        subprocess.check_call(['git', 'lfs', 'install'], stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, cwd=tb_dir)
         subprocess.check_call(['git', 'lfs', 'fetch'], stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, cwd=tb_dir)
@@ -51,22 +50,9 @@ def pip_install_requirements():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("models", nargs='*', default=[],
-                        help="Specify one or more models to install. If not set, install all models.")
     parser.add_argument("--continue_on_fail", action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
-
-    os.chdir(os.path.realpath(os.path.dirname(__file__)))
-
-    print(f"checking packages {', '.join(TORCH_DEPS)} are installed...", end="", flush=True)
-    try:
-        versions = get_pkg_versions(TORCH_DEPS)
-    except ModuleNotFoundError as e:
-        print("FAIL")
-        print(f"Error: Users must first manually install packages {TORCH_DEPS} before installing the benchmark.")
-        sys.exit(-1)
-    print("OK")
 
     print("checking out Git LFS files...", end="", flush=True)
     success, errmsg = git_lfs_checkout()
@@ -76,7 +62,7 @@ if __name__ == '__main__':
         print("FAIL")
         print("Failed to checkout git lfs files. Please make sure you have installed git lfs.")
         print(errmsg)
-        sys.exit(-1)
+        exit(-1)
     decompress_input()
 
     success, errmsg = pip_install_requirements()
@@ -85,13 +71,7 @@ if __name__ == '__main__':
         print(errmsg)
         if not args.continue_on_fail:
             sys.exit(-1)
-    new_versions = get_pkg_versions(TORCH_DEPS)
-    if versions != new_versions:
-        print(f"The torch packages are re-installed after installing the benchmark deps. \
-                Before: {versions}, after: {new_versions}")
-        sys.exit(-1)
-    from torchbenchmark import setup
-    success &= setup(models=args.models, verbose=args.verbose, continue_on_fail=args.continue_on_fail)
+    success &= setup(verbose=args.verbose, continue_on_fail=args.continue_on_fail)
     if not success:
         if args.continue_on_fail:
             print("Warning: some benchmarks were not installed due to failure")

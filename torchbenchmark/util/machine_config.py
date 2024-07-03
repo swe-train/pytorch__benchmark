@@ -149,7 +149,8 @@ def get_machine_type():
     # initially, just intend to identify a known environment and for any other 
     # environment revert to no-op.  Expand functionality over time as needed.
     if platform.system() == 'Linux':
-        if distro.name() == "Amazon Linux":
+        name = distro.linux_distribution()[0]
+        if name == "Amazon Linux":
             return MACHINE.AMAZON_LINUX
 
     return MACHINE.UNKNOWN

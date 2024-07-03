@@ -10,7 +10,6 @@ Logic:
 """
 import json
 
-from pathlib import Path
 import numpy as np
 import torch
 import torch.utils.data as data
@@ -66,6 +65,8 @@ class AudioDataset(data.Dataset):
         # Method 2: Generate minibatch based on batch_frames
         # i.e. each batch contains approximately #batch_frames frames
         else:  # batch_frames > 0
+            print("NOTE: Generate minibatch based on batch_frames.")
+            print("i.e. each batch contains approximately #batch_frames frames")
             start = 0
             while True:
                 total_frames = 0
@@ -143,10 +144,7 @@ def load_inputs_and_targets(batch, LFR_m=1, LFR_n=1):
     # load acoustic features and target sequence of token ids
     # for b in batch:
     #     print(b[1]['input'][0]['feat'])
-    # TorchBench: Patch the input data with current file directory
-    # Current file path: TORCHBENCH_ROOT/torchbenchmark/models/speech_transformer/speech_transformer/data/data.py
-    TORCHBENCH_ROOT = Path(__file__).parents[5]
-    xs = [kaldi_io.read_mat(str(TORCHBENCH_ROOT.joinpath(b[1]['input'][0]['feat']).resolve())) for b in batch]
+    xs = [kaldi_io.read_mat(b[1]['input'][0]['feat']) for b in batch]
     ys = [b[1]['output'][0]['tokenid'].split() for b in batch]
 
     if LFR_m != 1 or LFR_n != 1:

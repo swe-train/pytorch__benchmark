@@ -7,17 +7,12 @@
 
 set -xeo pipefail
 
-# Number of iterations
-if [ -z "$NUM_ITER" ]; then
-    NUM_ITER=1
-fi
 # Version of the config
 if [ -z "$CONFIG_VER" ]; then
     CONFIG_VER=v1
 fi
 CONFIG_DIR=${PWD}/torchbenchmark/score/configs/${CONFIG_VER}
 CONFIG_ENV=${CONFIG_DIR}/config-${CONFIG_VER}.env
-
 # Load environment variables
 set -a;
 source ${CONFIG_ENV}
@@ -25,7 +20,7 @@ set +a;
 
 DATA_JSON_PREFIX=$(date +"%Y%m%d_%H%M%S")
 if [ -z "$1" ]; then
-    echo "You must specify the output data dir"
+    echo "You must specify output data dir"
     exit 1
 fi
 DATA_DIR="$1"
@@ -41,14 +36,25 @@ sudo nvidia-smi -ac ${GPU_FREQUENCY}
 export CUDA_VISIBLE_DEVICES="${GPU_LIST}"
 export GOMP_CPU_AFFINITY="${CORE_LIST}"
 
-echo "Running benchmark with filter: \"${BENCHMARK_FILTER}\""
+# Comment out the ordinary benchmark steps, and replace them with LTC custom ones.
+# echo "Running benchmark with filter: \"${BENCHMARK_FILTER}\""
 
 # Run the benchmark
-for c in $(seq 1 $NUM_ITER); do
-    taskset -c "${CORE_LIST}" pytest test_bench.py -k "${BENCHMARK_FILTER}" \
-            --benchmark-min-rounds "${NUM_ROUNDS}" \
-            --benchmark-json ${DATA_DIR}/${DATA_JSON_PREFIX}_${c}.json \
-            --verbose
-done
+# for c in $(seq 1 $NUM_ITER); do
+#     taskset -c "${CORE_LIST}" pytest test_bench.py -k "${BENCHMARK_FILTER}" \
+#             --benchmark-min-rounds "${NUM_ROUNDS}" \
+#             --benchmark-json ${DATA_DIR}/${DATA_JSON_PREFIX}_${c}.json
+# done
+
+echo "Running check_lazy.py"
+# The output is a file full of JSON objects but not legit .JSON.
+python check_lazy.py --output_file ${DATA_DIR}/sweep.out
+python check_lazy.py --json_to_csv ${DATA_DIR}/sweep.out --output_file ${DATA_DIR}/sweep.csv
+
+# echo "Running lazy_bench.py"
+# pushd ../pytorch/lazy_tensor_core/
+# LTC_TS_CUDA=1 python lazy_bench.py -d cuda --fuser fuser2  --test train -x div -x hard -k resnet18 --repeat 3
+# LTC_TS_CUDA=1 python lazy_bench.py -d cuda --fuser fuser2  --test eval -k resnet18 --repeat 3
+# popd
 
 echo "Benchmark finished successfully. Output data dir is ${DATA_DIR}."

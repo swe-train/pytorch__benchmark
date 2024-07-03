@@ -9,15 +9,13 @@ import subprocess
 import sys
 import tempfile
 import threading
-from pathlib import Path
 from typing import Any, Callable, Dict, List, NoReturn, Optional, Tuple
 from urllib import request
 
 from components._impl.tasks import base as base_task
 from components._impl.workers import subprocess_worker
 
-REPO_PATH = Path(os.path.abspath(__file__)).parent.parent
-TORCH_DEPS = ['torch', 'torchvision', 'torchtext']
+
 proxy_suggestion = "Unable to verify https connectivity, " \
                    "required for setup.\n" \
                    "Do you need to use a proxy?"
@@ -36,36 +34,25 @@ def _test_https(test_url: str = 'https://github.com', timeout: float = 0.5) -> b
 
 
 def _install_deps(model_path: str, verbose: bool = True) -> Tuple[bool, Any]:
-    from .util.env_check import get_pkg_versions
     run_args = [
         [sys.executable, install_file],
     ]
-    run_env = os.environ.copy()
-    run_env["PYTHONPATH"] = this_dir.parent
     run_kwargs = {
         'cwd': model_path,
         'check': True,
-        'env': run_env,
     }
 
     output_buffer = None
     _, stdout_fpath = tempfile.mkstemp()
-
     try:
         output_buffer = io.FileIO(stdout_fpath, mode="w")
         if os.path.exists(os.path.join(model_path, install_file)):
             if not verbose:
                 run_kwargs['stderr'] = subprocess.STDOUT
                 run_kwargs['stdout'] = output_buffer
-            versions = get_pkg_versions(TORCH_DEPS)
             subprocess.run(*run_args, **run_kwargs)  # type: ignore
-            new_versions = get_pkg_versions(TORCH_DEPS)
-            if versions != new_versions:
-                errmsg = f"The torch packages are re-installed after installing the benchmark deps. \
-                           Before: {versions}, after: {new_versions}"
-                return (False, errmsg, None)
         else:
-            return (True, f"No install.py is found in {model_path}. Skip.", None)
+            return (False, f"No install.py is found in {model_path}.", None)
     except subprocess.CalledProcessError as e:
         return (False, e.output, io.FileIO(stdout_fpath, mode="r").read().decode())
     except Exception as e:
@@ -78,28 +65,20 @@ def _install_deps(model_path: str, verbose: bool = True) -> Tuple[bool, Any]:
 
 
 def _list_model_paths() -> List[str]:
-    def dir_contains_file(dir, file_name) -> bool:
-        names = map(lambda x: x.name, filter(lambda x: x.is_file(), dir.iterdir()))
-        return file_name in names
     p = pathlib.Path(__file__).parent.joinpath(model_dir)
-    # Only load the model directories that contain a "__init.py__" file
-    return sorted(str(child.absolute()) for child in p.iterdir() if child.is_dir() and dir_contains_file(child, "__init__.py"))
+    return sorted(str(child.absolute()) for child in p.iterdir() if child.is_dir())
 
 
-def setup(models: List[str] = [], verbose: bool = True, continue_on_fail: bool = False) -> bool:
+def setup(verbose: bool = True, continue_on_fail: bool = False) -> bool:
     if not _test_https():
         print(proxy_suggestion)
         sys.exit(-1)
 
     failures = {}
-    models = list(map(lambda p: p.lower(), models))
-    model_paths = filter(lambda p: True if not models else os.path.basename(p).lower() in models, _list_model_paths())
-    for model_path in model_paths:
+    for model_path in _list_model_paths():
         print(f"running setup for {model_path}...", end="", flush=True)
         success, errmsg, stdout_stderr = _install_deps(model_path, verbose=verbose)
-        if success and errmsg and "No install.py is found" in errmsg:
-            print("SKIP - No install.py is found")
-        elif success:
+        if success:
             print("OK")
         else:
             print("FAIL")
@@ -211,6 +190,9 @@ class ModelTask(base_task.TaskBase):
             )
         )
 
+        if self._details._diagnostic_msg:
+            print(self._details._diagnostic_msg)
+
     def __del__(self) -> None:
         self._lock.release()
 
@@ -265,9 +247,9 @@ class ModelTask(base_task.TaskBase):
 
     @base_task.run_in_worker(scoped=True)
     @staticmethod
-    def make_model_instance(test: str, device: str, jit: bool, batch_size: Optional[int]=None, extra_args: List[str]=[]) -> None:
+    def make_model_instance(device: str, jit: bool) -> None:
         Model = globals()["Model"]
-        model = Model(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
+        model = Model(device=device, jit=jit)
 
         import gc
         gc.collect()
@@ -282,22 +264,6 @@ class ModelTask(base_task.TaskBase):
             "model": model,
             "maybe_sync": maybe_sync,
         })
-
-    # =========================================================================
-    # == Get Model attribute in the child process =============================
-    # =========================================================================
-    @base_task.run_in_worker(scoped=True)
-    @staticmethod
-    def get_model_attribute(attr: str, field: str=None) -> Any:
-        model = globals()["model"]
-        if hasattr(model, attr):
-            if field:
-                model_attr = getattr(model, attr)
-                return getattr(model_attr, field)
-            else:
-                return getattr(model, attr)
-        else:
-            return None
 
     def gc_collect(self) -> None:
         self.worker.run("""
@@ -319,14 +285,20 @@ class ModelTask(base_task.TaskBase):
     def set_train(self) -> None:
         self.worker.run("model.set_train()")
 
-    def invoke(self) -> None:
+    def train(self) -> None:
         self.worker.run("""
-            model.invoke()
+            model.train()
             maybe_sync()
         """)
 
     def set_eval(self) -> None:
         self.worker.run("model.set_eval()")
+
+    def eval(self) -> None:
+        self.worker.run("""
+            model.eval()
+            maybe_sync()
+        """)
 
     def extract_details_train(self) -> None:
         self._details.metadata["train_benchmark"] = self.worker.load_stmt("torch.backends.cudnn.benchmark")
@@ -371,35 +343,6 @@ class ModelTask(base_task.TaskBase):
             module(**example_inputs)
         else:
             module(*example_inputs)
-        # If model implements `gen_inputs()` interface, test the first example input it generates
-        try:
-            input_iter, _size = model.gen_inputs()
-            next_inputs = next(input_iter)
-
-            for input in next_inputs:
-                if isinstance(input, dict):
-                    # Huggingface models pass **kwargs as arguments, not *args
-                    module(**input)
-                else:
-                    module(*input)
-        except NotImplementedError:
-            # We allow models that don't implement this interface
-            pass
-
-    @base_task.run_in_worker(scoped=True)
-    @staticmethod
-    def check_eval_output() -> None:
-        instance = globals()["model"]
-        import torch
-        assert instance.test == "eval", "We only support checking output of an eval test. Please submit a bug report."
-        out = instance.invoke()
-        model_name = getattr(instance, 'name', None)
-        if not isinstance(out, tuple):
-            raise RuntimeError(f'Model {model_name} eval test output is not a tuple')
-        for ind, element in enumerate(out):
-            if not isinstance(element, torch.Tensor):
-                raise RuntimeError(f'Model {model_name} eval test output is tuple, but'
-                                   f' its {ind}-th element is not a Tensor.')
 
     @base_task.run_in_worker(scoped=True)
     @staticmethod
@@ -550,8 +493,3 @@ def get_metadata_from_yaml(path):
         with open(metadata_path, 'r') as f:
             md = yaml.load(f, Loader=yaml.FullLoader)
     return md
-
-def str_to_bool(input: Any) -> bool:
-    if not input:
-        return False
-    return str(input).lower() in ("1", "yes", "y", "true", "t", "on")

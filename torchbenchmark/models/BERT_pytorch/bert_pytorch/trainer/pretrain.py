@@ -6,6 +6,8 @@ from torch.utils.data import DataLoader
 from ..model import BERTLM, BERT
 from .optim_schedule import ScheduledOptim
 
+import tqdm
+
 
 class BERTTrainer:
     """
@@ -36,7 +38,7 @@ class BERTTrainer:
 
         # Setup cuda device for BERT training, argument -c, --cuda should be true
         cuda_condition = torch.cuda.is_available() and with_cuda
-        self.device = torch.device("cuda:0" if cuda_condition else "cpu")
+        self.device = torch.device("cuda:0" if cuda_condition else "lazy")
 
         # This BERT model will be saved every epoch
         self.bert = bert
@@ -80,7 +82,11 @@ class BERTTrainer:
         """
         str_code = "train" if train else "test"
 
-        data_iter = enumerate(data_loader)
+        # Setting the tqdm progress bar
+        data_iter = tqdm.tqdm(enumerate(data_loader),
+                              desc="EP_%s:%d" % (str_code, epoch),
+                              total=len(data_loader),
+                              bar_format="{l_bar}{r_bar}")
 
         avg_loss = 0.0
         total_correct = 0

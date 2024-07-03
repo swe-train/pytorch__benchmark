@@ -4,5 +4,3 @@ eval_nograd: true
 optimized_for_inference: true
 train_benchmark: false
 train_deterministic: false
-not_implemented:
-  - test: train

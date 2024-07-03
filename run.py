@@ -10,12 +10,16 @@ Wall time provided for sanity but is not a sane benchmark measurement.
 """
 import argparse
 import time
-import numpy as np
 import torch.profiler as profiler
 
 from torchbenchmark import load_model_by_name
 import torch
 
+import lazy_tensor_core
+lazy_tensor_core._LAZYC._ltc_init_ts_backend()
+import lazy_tensor_core.debug.metrics as metrics
+from caffe2.python import workspace
+workspace.GlobalInit(['caffe2', '--caffe2_log_level=-4'])
 WARMUP_ROUNDS = 3
 
 def run_one_step_with_cudastreams(func, streamcount):
@@ -52,54 +56,39 @@ def run_one_step_with_cudastreams(func, streamcount):
         print('{:<20} {:>20}'.format("GPU Time:", "%.3f milliseconds" % start_event.elapsed_time(end_event)), sep='')
 
 
-def run_one_step(func, nwarmup=WARMUP_ROUNDS, model_flops=None, num_iter=10):
+def run_one_step(func, nwarmup=WARMUP_ROUNDS):
     # Warm-up `nwarmup` rounds
     for _i in range(nwarmup):
         func()
 
-    result_summary = []
-    for _i in range(num_iter):
-        if args.device == "cuda":
-            torch.cuda.synchronize()
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-
-            # Collect time_ns() instead of time() which does not provide better precision than 1
-            # second according to https://docs.python.org/3/library/time.html#time.time.
-            t0 = time.time_ns()
-            start_event.record()
-            func()
-            t1 = time.time_ns()
-
-            end_event.record()
-            torch.cuda.synchronize()
-            t2 = time.time_ns()
-
-            # CPU Dispatch time include only the time it took to dispatch all the work to the GPU.
-            # CPU Total Wall Time will include the CPU Dispatch, GPU time and device latencies.
-            result_summary.append((start_event.elapsed_time(end_event), (t1 - t0) / 1_000_000, (t2 - t0) / 1_000_000))
-        else:
-            t0 = time.time_ns()
-            func()
-            t1 = time.time_ns()
-            result_summary.append([(t1 - t0) / 1_000_000])
-
     if args.device == "cuda":
-        gpu_time = np.median(list(map(lambda x: x[0], result_summary)))
-        cpu_dispatch_time = np.median(list(map(lambda x: x[1], result_summary)))
-        cpu_walltime = np.median(list(map(lambda x: x[2], result_summary)))
-        print('{:<20} {:>20}'.format("GPU Time:", "%.3f milliseconds" % gpu_time, sep=''))
-        print('{:<20} {:>20}'.format("CPU Dispatch Time:", "%.3f milliseconds" % cpu_dispatch_time, sep=''))
-        print('{:<20} {:>20}'.format("CPU Total Wall Time:", "%.3f milliseconds" % cpu_walltime, sep=''))
-    else:
-        cpu_walltime = np.median(list(map(lambda x: x[0], result_summary)))
-        print('{:<20} {:>20}'.format("CPU Total Wall Time:", "%.3f milliseconds" % cpu_walltime, sep=''))
+        torch.cuda.synchronize()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
 
-    # if model_flops is not None, output the TFLOPs per sec
-    if model_flops:
-        flops, batch_size = model_flops
-        tflops = flops * batch_size / (cpu_walltime / 1.0e9) / 1.0e12
-        print('{:<20} {:>20}'.format("FLOPS:", "%.4f TFLOPs per second" % tflops, sep=''))
+        # Collect time_ns() instead of time() which does not provide better precision than 1
+        # second according to https://docs.python.org/3/library/time.html#time.time.
+        t0 = time.time_ns()
+        func()
+        t1 = time.time_ns()
+
+        end_event.record()
+        torch.cuda.synchronize()
+        t2 = time.time_ns()
+
+        # CPU Dispatch time include only the time it took to dispatch all the work to the GPU.
+        # CPU Total Wall Time will include the CPU Dispatch, GPU time and device latencies.
+        print('{:<20} {:>20}'.format("GPU Time:", "%.3f milliseconds" % start_event.elapsed_time(end_event)), sep='')
+        print('{:<20} {:>20}'.format("CPU Dispatch Time:", "%.3f milliseconds" % ((t1 - t0) / 1_000_000)), sep='')
+        print('{:<20} {:>20}'.format("CPU Total Wall Time:", "%.3f milliseconds" % ((t2 - t0) / 1_000_000)), sep='')
+
+    else:
+        t0 = time.time_ns()
+        func()
+        t1 = time.time_ns()
+        print('{:<20} {:>20}'.format("CPU Total Wall Time:", "%.3f milliseconds" % ((t1 - t0) / 1_000_000)), sep='')
+
 
 def profile_one_step(func, nwarmup=WARMUP_ROUNDS):
     activity_groups = []
@@ -144,11 +133,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(__doc__)
     SUPPORT_DEVICE_LIST = ["cpu", "cuda"]
     parser.add_argument("model", help="Full or partial name of a model to run.  If partial, picks the first match.")
-    parser.add_argument("-d", "--device", choices=SUPPORT_DEVICE_LIST, default="cpu", help="Which device to use.")
     parser.add_argument("-m", "--mode", choices=["eager", "jit"], default="eager", help="Which mode to run.")
-    parser.add_argument("-t", "--test", choices=["eval", "train"], default="eval", help="Which test to run.")
     parser.add_argument("--profile", action="store_true", help="Run the profiler around the function")
-    parser.add_argument("--profile-folder", default="./logs", help="Save profiling model traces to this directory.")
     parser.add_argument("--profile-detailed", action="store_true",
                         help="Profiling includes record_shapes, profile_memory, with_stack, and with_flops.")
     parser.add_argument("--profile-devices", type=_validate_devices,
@@ -156,8 +142,7 @@ if __name__ == "__main__":
     parser.add_argument("--cudastreams", action="store_true",
                         help="Utilization test using increasing number of cuda streams.")
     parser.add_argument("--bs", type=int, help="Specify batch size to the test.")
-    parser.add_argument("--flops", action="store_true", help="Return the flops result")
-    args, extra_args = parser.parse_known_args()
+    args = parser.parse_args()
 
     if args.cudastreams and not args.device == "cuda":
         print("cuda device required to use --cudastreams option!")
@@ -168,24 +153,30 @@ if __name__ == "__main__":
     if not Model:
         print(f"Unable to find model matching {args.model}.")
         exit(-1)
+
     print(f"Running {args.test} method from {Model.name} on {args.device} in {args.mode} mode.")
 
     # build the model and get the chosen test method
-    if args.flops:
-        extra_args.append("--flops")
+    if args.bs:
+        try:
+            if args.test == "eval":
+                m = Model(device=args.device, jit=(args.mode == "jit"), eval_bs=args.bs)
+            elif args.test == "train":
+                m = Model(device=args.device, jit=(args.mode == "jit"), train_bs=args.bs)
+        except:
+            print(f"The model {args.model} doesn't support specifying batch size, please remove --bs argument in the commandline.")
+            exit(1)
+    else:
+        m = Model(device=args.device, jit=(args.mode == "jit"))
 
-    m = Model(device=args.device, test=args.test, jit=(args.mode == "jit"), batch_size=args.bs, extra_args=extra_args)
+    test = getattr(m, args.test)
 
-    test = m.invoke
-    model_flops = None
-    if args.flops:
-        assert hasattr(m, "get_flops"), f"The model {args.model} does not support calculating flops."
-        model_flops = m.get_flops()
     if args.profile:
         profile_one_step(test)
     elif args.cudastreams:
         run_one_step_with_cudastreams(test, 10)
     else:
-        run_one_step(test, model_flops=model_flops)
-    if hasattr(m, 'correctness'):
-        print('{:<20} {:>20}'.format("Correctness:", "%.15f" % m.correctness), sep='')
+        run_one_step(test)
+
+    if args.device == 'lazy':
+        print(metrics.counter_names())
