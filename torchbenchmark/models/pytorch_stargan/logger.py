@@ -1,7 +1,7 @@
 import tensorflow as tf
 
 
-class Logger:
+class Logger(object):
     """Tensorboard logger."""
 
     def __init__(self, log_dir):

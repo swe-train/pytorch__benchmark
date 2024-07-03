@@ -244,13 +244,11 @@ class backWarp(nn.Module):
 
         super(backWarp, self).__init__()
         # create a grid
+        gridX, gridY = np.meshgrid(np.arange(W), np.arange(H))
         self.W = W
         self.H = H
-        
-        # Use torch.meshgrid instead of np.meshgrid to imrpove performance
-        # https://github.com/avinashpaliwal/Super-SloMo/pull/111
-        self.gridX, self.gridY = torch.meshgrid(torch.arange(W, requires_grad=False, device=device), 
-                                                torch.arange(H, requires_grad=False, device=device), indexing='xy')
+        self.gridX = torch.tensor(gridX, requires_grad=False, device=device)
+        self.gridY = torch.tensor(gridY, requires_grad=False, device=device)
         
     def forward(self, img, flow):
         """
@@ -275,8 +273,8 @@ class backWarp(nn.Module):
         # Extract horizontal and vertical flows.
         u = flow[:, 0, :, :]
         v = flow[:, 1, :, :]
-        x = self.gridX.unsqueeze(0).expand_as(u).to(dtype=u.dtype) + u
-        y = self.gridY.unsqueeze(0).expand_as(v).to(dtype=u.dtype) + v
+        x = self.gridX.unsqueeze(0).expand_as(u).float() + u
+        y = self.gridY.unsqueeze(0).expand_as(v).float() + v
         # range -1 to 1
         x = 2*(x/self.W - 0.5)
         y = 2*(y/self.H - 0.5)
@@ -290,7 +288,7 @@ class backWarp(nn.Module):
 # Creating an array of `t` values for the 7 intermediate frames between
 # reference frames I0 and I1. 
 
-def getFlowCoeff (indices, device: torch.device, dtype: torch.dtype):
+def getFlowCoeff (indices, device: torch.device):
     """
     Gets flow coefficients used for calculating intermediate optical
     flows from optical flows between I0 and I1: F_0_1 and F_1_0.
@@ -317,7 +315,7 @@ def getFlowCoeff (indices, device: torch.device, dtype: torch.dtype):
         tensor
             coefficients C00, C01, C10, C11.
     """
-    t = torch.linspace(0.125, 0.875, 7, device=device, dtype=dtype)
+    t = torch.linspace(0.125, 0.875, 7)
 
 
     # Convert indices tensor to numpy array
@@ -328,7 +326,7 @@ def getFlowCoeff (indices, device: torch.device, dtype: torch.dtype):
     C10 = (1 - (t[ind])) * (1 - (t[ind]))
     return C00[None, None, None, :].permute(3, 0, 1, 2).to(device), C01[None, None, None, :].permute(3, 0, 1, 2).to(device), C10[None, None, None, :].permute(3, 0, 1, 2).to(device), C11[None, None, None, :].permute(3, 0, 1, 2).to(device)
 
-def getWarpCoeff (indices, device: torch.device, dtype: torch.dtype):
+def getWarpCoeff (indices, device: torch.device):
     """
     Gets coefficients used for calculating final intermediate 
     frame `It_gen` from backwarped images using flows F_t_0 and F_t_1.
@@ -355,7 +353,7 @@ def getWarpCoeff (indices, device: torch.device, dtype: torch.dtype):
         tensor
             coefficients C0 and C1.
     """
-    t = torch.linspace(0.125, 0.875, 7, device=device, dtype=dtype)
+    t = torch.linspace(0.125, 0.875, 7)
 
 
     # Convert indices tensor to numpy array

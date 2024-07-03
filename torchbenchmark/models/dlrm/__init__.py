@@ -38,11 +38,11 @@ from torchbenchmark.tasks import RECOMMENDATION
 
 class Model(BenchmarkModel):
     task = RECOMMENDATION.RECOMMENDATION
-    DEFAULT_TRAIN_BSIZE = 2048
-    DEFAULT_EVAL_BSIZE = 2048
+    DEFAULT_TRAIN_BSIZE = 1000
+    DEFAULT_EVAL_BSIZE = 1000
 
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
+        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
 
         # Train architecture: use the configuration in the paper.
         # Source: https://arxiv.org/pdf/1906.00091.pdf
@@ -51,8 +51,8 @@ class Model(BenchmarkModel):
         arch_mlp_bot = "512-512-64"
         arch_mlp_top = "1024-1024-1024-1"
         data_generation = "random"
-        mini_batch_size = self.batch_size
-        num_batches = 1
+        mini_batch_size = 2048
+        num_batches = self.batch_size
         num_indicies_per_lookup = 100
 
         self.opt = Namespace(**{
@@ -196,40 +196,20 @@ class Model(BenchmarkModel):
     def get_module(self):
         return self.model, self.example_inputs
 
-    def get_optimizer(self):
-        if hasattr(self, "optimizer"):
-            return self.optimizer
-        return None
-
-    def set_optimizer(self, optimizer) -> None:
-        self.optimizer = optimizer
-        self.lr_scheduler = LRPolicyScheduler(self.optimizer,
-                                              self.opt.lr_num_warmup_steps,
-                                              self.opt.lr_decay_start_step,
-                                              self.opt.lr_num_decay_steps)
-
-    def eval(self) -> Tuple[torch.Tensor]:
-        out = self.model(*self.example_inputs)
+    def eval(self, niter=1) -> Tuple[torch.Tensor]:
+        for _ in range(niter):
+            out = self.model(*self.example_inputs)
         return (out, )
 
-    def train(self):
+    def train(self, niter=1):
         gen = self.model(*self.example_inputs)
-        self.optimizer.zero_grad()
-        loss = self.loss_fn(gen, self.targets)
-        if self.opt.loss_function == "wbce":
-            loss_ws_ = self.loss_ws[T.data.view(-1).long()].view_as(T)
-            loss = loss_ws_ * loss
-            loss = loss.mean()
-        loss.backward()
-        self.optimizer.step()
-        self.lr_scheduler.step()
-
-    # get_optimizer override is important! This model has both a self.opt
-    # _and_ a self.optimizer and we want just the optimizer
-    def get_optimizer(self):
-        return self.optimizer
-
-    # set_optimizer override is important! This model has both a self.opt
-    # _and_ a self.optimizer and we want just the optimizer
-    def set_optimizer(self, optimizer) -> None:
-        self.optimizer = optimizer
+        for _ in range(niter):
+            self.optimizer.zero_grad()
+            loss = self.loss_fn(gen, self.targets)
+            if self.opt.loss_function == "wbce":
+                loss_ws_ = self.loss_ws[T.data.view(-1).long()].view_as(T)
+                loss = loss_ws_ * loss
+                loss = loss.mean()
+            loss.backward()
+            self.optimizer.step()
+            self.lr_scheduler.step()

@@ -31,8 +31,8 @@ class Model(BenchmarkModel):
     DEFAULT_TRAIN_BSIZE = 32
     DEFAULT_EVAL_BSIZE = 32
 
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
+        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
         self.opt = Namespace(**{
             'arch': 'resnet50',
             'epochs': 2,
@@ -88,6 +88,7 @@ class Model(BenchmarkModel):
     def get_module(self):
         """ Recommended
         Returns model, example_inputs
+        model should be torchscript model if self.jit is True.
         Both model and example_inputs should be on self.device properly.
         `model(*example_inputs)` should execute one step of model forward.
         """
@@ -96,24 +97,19 @@ class Model(BenchmarkModel):
             images = (i[0], i[1])
         return self.model, images
 
-    def get_optimizer(self):
-        """ Returns the current optimizer """
-        return self.optimizer
-
-    def get_optimizer(self, optimizer) -> None:
-        """ Sets the optimizer for future training """
-        self.optimizer = optimizer
-
-    def train(self):
+    def train(self, niter=1):
         """ Recommended
-        Runs training on model for one epoch.
+        Runs training on model for `niter` times. When `niter` is left
+        to its default value, it should run for at most two minutes, and be representative
+        of the performance of a traditional training loop. One iteration should be sufficient
+        to warm up the model for the purpose of profiling.
+
         Avoid unnecessary benchmark noise by keeping any tensor creation, memcopy operations in __init__.
 
         Leave warmup to the caller (e.g. don't do it inside)
         """
         self.model.train()
-        n_epochs = 1
-        for e in range(n_epochs):
+        for e in range(niter):
             adjust_learning_rate(self.optimizer, e, self.opt)
             for i, (images, _) in enumerate(self.example_inputs):
                 # compute output
@@ -125,9 +121,9 @@ class Model(BenchmarkModel):
                 loss.backward()
                 self.optimizer.step()
 
-    def eval(self) -> Tuple[torch.Tensor]:
+    def eval(self, niter=1) -> Tuple[torch.Tensor]:
         """ Recommended
-        Run evaluation on model for one iteration. One iteration should be sufficient
+        Run evaluation on model for `niter` inputs. One iteration should be sufficient
         to warm up the model for the purpose of profiling.
         In most cases this can use the `get_module` API but in some cases libraries
         do not have a single Module object used for inference. In these case, you can
@@ -137,6 +133,7 @@ class Model(BenchmarkModel):
 
         Leave warmup to the caller (e.g. don't do it inside)
         """
-        for i, (images, _) in enumerate(self.example_inputs):
-            out = self.model(im_q=images[0], im_k=images[1])
+        for i in range(niter):
+            for i, (images, _) in enumerate(self.example_inputs):
+                out = self.model(im_q=images[0], im_k=images[1])
         return out

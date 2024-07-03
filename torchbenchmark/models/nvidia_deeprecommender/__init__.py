@@ -9,6 +9,7 @@
 
 import torch
 
+from torchbenchmark.models.attention_is_all_you_need_pytorch.train import train
 from ...util.model import BenchmarkModel
 from torchbenchmark.tasks import RECOMMENDATION
 from typing import Tuple
@@ -23,16 +24,17 @@ class Model(BenchmarkModel):
   DEFAULT_TRAIN_BSIZE = 256
   DEFAULT_EVAL_BSIZE = 256
 
-  def __init__(self, test, device, batch_size=None, extra_args=[]):
-    super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+  def __init__(self, test, device, batch_size=None, jit=False, extra_args=[]):
+    super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
     self.eval_mode = True if self.test == "eval" else False
 
     if test == "train":
-      self.model = DeepRecommenderTrainBenchmark(device = self.device, jit = False, batch_size=self.batch_size)
+      self.model = DeepRecommenderTrainBenchmark(device = self.device, jit = jit, batch_size=self.batch_size)
     elif test == "eval":
-      self.model = DeepRecommenderInferenceBenchmark(device = self.device, jit = False, batch_size=self.batch_size)
+      self.model = DeepRecommenderInferenceBenchmark(device = self.device, jit = jit, batch_size=self.batch_size)
 
   def jit_callback(self):
+    assert self.jit, "Calling JIT callback without specifying the JIT option."
     self.model.rencoder = torch.jit.trace(self.model.rencoder, (self.model.toyinputs, ))
 
   def get_module(self):
@@ -49,17 +51,13 @@ class Model(BenchmarkModel):
   def set_train(self):
     self.eval_mode = False
 
-  def get_optimizer(self):
-    return self.model.get_optimizer()
+  def train(self, niter=1):
+    for i in range(niter):
+      self.model.train(niter)
 
-  def set_optimizer(self, optimizer) -> None:
-    self.model.set_optimizer(optimizer)
-
-  def train(self):
-    self.model.train()
-
-  def eval(self) -> Tuple[torch.Tensor]:
-    out = self.model.eval()
+  def eval(self, niter=1) -> Tuple[torch.Tensor]:
+    for i in range(niter):
+      out = self.model.eval(niter)
     return (out, )
 
   def timed_infer(self):

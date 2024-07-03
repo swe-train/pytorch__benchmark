@@ -15,7 +15,7 @@ class TwoCropsTransform:
         return [q, k]
 
 
-class GaussianBlur:
+class GaussianBlur(object):
     """Gaussian blur augmentation in SimCLR https://arxiv.org/abs/2002.05709"""
 
     def __init__(self, sigma=[.1, 2.]):

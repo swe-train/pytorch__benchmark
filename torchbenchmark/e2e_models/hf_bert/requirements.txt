@@ -5,5 +5,3 @@ scipy
 scikit-learn
 protobuf
 torch
-evaluate
-sacrebleu

@@ -221,13 +221,14 @@ CONFIG = {
         ]
 }
 
+SYNTHETIC_DATA = []
+
 
 class TTSModel:
     def __init__(self, device, batch_size):
         self.device = device
         self.use_cuda = True if self.device == 'cuda' else False
 
-        self.SYNTHETIC_DATA = []
         self.c = AttrDict()
         self.c.update(CONFIG)
         c = self.c
@@ -237,35 +238,26 @@ class TTSModel:
                                     num_lstm_layers=c.model['num_lstm_layers'])
         self.optimizer = RAdam(self.model.parameters(), lr=c.lr)
         self.criterion = AngleProtoLoss()
-        self.SYNTHETIC_DATA.append(T.rand(batch_size, 50, 40).to(device=self.device))
+        SYNTHETIC_DATA.append(T.rand(batch_size, 50, 40).to(device=self.device))
 
         if self.use_cuda:
             self.model = self.model.cuda()
             self.criterion.cuda()
 
-        # If scheduler in the future needs to depend on the optimizer, be sure to update
-        # self.scheduler in set_optimizer as well!
         self.scheduler = None
         self.global_step = 0
 
     def __del__(self):
-        del self.SYNTHETIC_DATA[0]
+        del SYNTHETIC_DATA[0]
 
-    def train(self):
-        niter = 1
+    def train(self, niter):
         _, global_step = self._train(self.model, self.criterion,
                                      self.optimizer, self.scheduler, None,
                                      self.global_step, self.c, niter)
 
     def eval(self):
-        result = self.model(self.SYNTHETIC_DATA[0])
+        result = self.model(SYNTHETIC_DATA[0])
         return result
-
-    def get_optimizer(self):
-        return self.optimizer
-
-    def set_optimizer(self, optimizer) -> None:
-        self.optimizer = optimizer
 
     def __call__(self, *things):
         return self
@@ -281,7 +273,7 @@ class TTSModel:
         # for _, data in enumerate(data_loader):
         start_time = time.time()
         for reps in range(niter):
-            for _, data in enumerate(self.SYNTHETIC_DATA):
+            for _, data in enumerate(SYNTHETIC_DATA):
                 # setup input data
                 # inputs = data[0]
                 inputs = data

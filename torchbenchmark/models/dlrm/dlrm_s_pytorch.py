@@ -149,7 +149,8 @@ class DLRM_Net(nn.Module):
             mean = 0.0  # std_dev = np.sqrt(variance)
             std_dev = np.sqrt(2 / (m + n))  # np.sqrt(1 / m) # np.sqrt(1 / n)
             W = np.random.normal(mean, std_dev, size=(m, n)).astype(np.float32)
-            bt = np.zeros(m).astype(np.float32) # see upstream PR at https://github.com/facebookresearch/dlrm/pull/358
+            std_dev = np.sqrt(1 / m)  # np.sqrt(2 / (m + 1))
+            bt = np.random.normal(mean, std_dev, size=m).astype(np.float32)
             # approach 1
             LL.weight.data = torch.tensor(W, requires_grad=True)
             LL.bias.data = torch.tensor(bt, requires_grad=True)
@@ -315,8 +316,8 @@ class DLRM_Net(nn.Module):
             # li, lj = torch.tril_indices(ni, nj, offset=offset)
             # approach 2: custom
             offset = 1 if self.arch_interaction_itself else 0
-            li = torch.tensor([i for i in range(ni) for j in range(i + offset)], device=x.device)
-            lj = torch.tensor([j for i in range(nj) for j in range(i + offset)], device=x.device)
+            li = torch.tensor([i for i in range(ni) for j in range(i + offset)])
+            lj = torch.tensor([j for i in range(nj) for j in range(i + offset)])
             Zflat = Z[:, li, lj]
             # concatenate dense features and interactions
             R = torch.cat([x] + [Zflat], dim=1)

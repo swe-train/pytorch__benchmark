@@ -21,7 +21,7 @@ class BERTTrainer:
     def __init__(self, bert: BERT, vocab_size: int,
                  train_dataloader: DataLoader, test_dataloader: DataLoader = None,
                  lr: float = 1e-4, betas=(0.9, 0.999), weight_decay: float = 0.01, warmup_steps=10000,
-                 device: str = "cuda", device_ids=None, log_freq: int = 10, debug: str = None):
+                 with_cuda: bool = True, cuda_devices=None, log_freq: int = 10, debug: str = None):
         """
         :param bert: BERT model which you want to train
         :param vocab_size: total word vocab size
@@ -30,12 +30,13 @@ class BERTTrainer:
         :param lr: learning rate of optimizer
         :param betas: Adam optimizer betas
         :param weight_decay: Adam optimizer weight decay param
-        :param device: device to use for training
+        :param with_cuda: traning with cuda
         :param log_freq: logging frequency of the batch iteration
         """
 
         # Setup cuda device for BERT training, argument -c, --cuda should be true
-        self.device = torch.device(device)
+        cuda_condition = torch.cuda.is_available() and with_cuda
+        self.device = torch.device("cuda:0" if cuda_condition else "cpu")
 
         # This BERT model will be saved every epoch
         self.bert = bert
@@ -43,8 +44,8 @@ class BERTTrainer:
         self.model = BERTLM(bert, vocab_size).to(self.device)
 
         # Distributed GPU training if CUDA can detect more than 1 GPU
-        if self.device.type == "cuda" and torch.cuda.device_count() > 1:
-            self.model = nn.DataParallel(self.model, device_ids=device_ids)
+        if with_cuda and torch.cuda.device_count() > 1:
+            self.model = nn.DataParallel(self.model, device_ids=cuda_devices)
 
         # Setting the train and test data loader
         self.train_data = train_dataloader
@@ -53,20 +54,12 @@ class BERTTrainer:
         # Setting the Adam optimizer with hyper-param
         self.optim = Adam(self.model.parameters(), lr=lr, betas=betas, weight_decay=weight_decay)
         self.optim_schedule = ScheduledOptim(self.optim, self.bert.hidden, n_warmup_steps=warmup_steps)
-        self.warmup_steps = warmup_steps
 
         # Using Negative Log Likelihood Loss function for predicting the masked_token
         self.criterion = nn.NLLLoss(ignore_index=0)
 
         self.log_freq = log_freq
         self.debug = debug
-
-    def get_optimizer(self):
-        return self.optim
-    
-    def set_optimizer(self, optimizer: torch.optim.Optimizer):
-        self.optim = optimizer
-        self.optim_schedule = ScheduledOptim(optimizer, self.bert.hidden, n_warmup_steps=self.warmup_steps)
 
     def train(self, epoch):
         self.iteration(epoch, self.train_data)

@@ -9,7 +9,7 @@ from .model import Generator
 from .model import Discriminator
 
 
-class Solver:
+class Solver(object):
     """Solver for training and testing StarGAN."""
 
     def __init__(self, celeba_loader, rafd_loader, config, should_script=False):

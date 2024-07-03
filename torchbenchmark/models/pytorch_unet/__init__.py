@@ -26,8 +26,8 @@ class Model(BenchmarkModel):
     DEFAULT_TRAIN_CUDA_PRECISION = "amp"
     DEFAULT_EVAL_CUDA_PRECISION = "amp"
 
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, test, device, batch_size=None, jit=False, extra_args=[]):
+        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
 
         self.args = self._get_args()
         # The sample inputs shape used here mimic the setting of the original repo
@@ -41,7 +41,6 @@ class Model(BenchmarkModel):
             self.model.train()
         elif test == "eval":
             self.model.eval()
-        self.optimizer = optim.RMSprop(self.model.parameters(), lr=self.args.lr, weight_decay=1e-8, momentum=0.9)
 
     def get_module(self):
         return self.model, (self.example_inputs,)
@@ -49,14 +48,15 @@ class Model(BenchmarkModel):
     def enable_amp(self):
         self.args.amp = True
 
-    def train(self):
+    def train(self, niter=1):
+        optimizer = optim.RMSprop(self.model.parameters(), lr=self.args.lr, weight_decay=1e-8, momentum=0.9)
         grad_scaler = torch.cuda.amp.GradScaler(enabled=self.args.amp)
         criterion = nn.CrossEntropyLoss()
 
         self.model.train()
 
-        if True:
-            with torch.cuda.amp.autocast(enabled=self.args.amp):
+        with torch.cuda.amp.autocast(enabled=self.args.amp):
+            for _ in range(niter):
                 masks_pred = self.model(self.example_inputs)
                 masks_true = self.sample_masks
                 loss = criterion(masks_pred, masks_true) + \
@@ -65,28 +65,22 @@ class Model(BenchmarkModel):
                         F.one_hot(masks_true, self.model.n_classes).permute(0, 3, 1, 2).float(),
                         multiclass=True)
 
-            self.optimizer.zero_grad(set_to_none=True)
-            grad_scaler.scale(loss).backward()
-            grad_scaler.step(self.optimizer)
-            grad_scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+                grad_scaler.scale(loss).backward()
+                grad_scaler.step(optimizer)
+                grad_scaler.update()
 
-    def jit_callback(self):
-        if self.test == 'eval':
-            self.model = torch.jit.optimize_for_inference( \
-                torch.jit.freeze(torch.jit.script(self.model.eval()), preserved_attrs=["n_classes"]))
-        else:
-            self.model = torch.jit.script(self.model)
-
-    def eval(self) -> Tuple[torch.Tensor]:
+    def eval(self, niter=1) -> Tuple[torch.Tensor]:
         self.model.eval()
         with torch.no_grad():
-            with torch.cuda.amp.autocast(enabled=self.args.amp):
-                mask_pred = self.model(self.example_inputs)
+            for _ in range(niter):
+                with torch.cuda.amp.autocast(enabled=self.args.amp):
+                    mask_pred = self.model(self.example_inputs)
 
-                if self.model.n_classes == 1:
-                    mask_pred = (F.sigmoid(mask_pred) > 0.5).float()
-                else:
-                    mask_pred = F.one_hot(mask_pred.argmax(dim=1), self.model.n_classes).permute(0, 3, 1, 2).float()
+                    if self.model.n_classes == 1:
+                        mask_pred = (F.sigmoid(mask_pred) > 0.5).float()
+                    else:
+                        mask_pred = F.one_hot(mask_pred.argmax(dim=1), self.model.n_classes).permute(0, 3, 1, 2).float()
         return (mask_pred, )
 
     def _get_args(self):

@@ -6,7 +6,6 @@ import argparse
 import torch
 import os
 import numpy as np
-from contextlib import nullcontext
 
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = True
@@ -31,15 +30,12 @@ class Model(BenchmarkModel):
     # Original train batch size: 16
     # Source: https://github.com/ultralytics/yolov3/blob/master/train.py#L447
     DEFAULT_TRAIN_BSIZE = 16
-    DEFAULT_EVAL_BSIZE = 8
+    DEFAULT_EVAL_BSIZE = 16
     # yolov3 CUDA inference test uses amp precision
     DEFAULT_EVAL_CUDA_PRECISION = "amp"
 
-    # TODO: yolov3 does use an optimizer, but it is inaccessible from this file.
-    CANNOT_SET_CUSTOM_OPTIMIZER = True
-
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
+        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
         # run just 1 epoch
         self.num_epochs = 1
         self.train_num_batch = 1
@@ -52,7 +48,6 @@ class Model(BenchmarkModel):
             self.training_loop, self.model, self.example_inputs = prepare_training_loop(train_args)
         elif test == "eval":
             self.model, self.example_inputs = self.prep_eval()
-        self.amp_context = nullcontext
 
     def prep_eval(self):
         parser = argparse.ArgumentParser()
@@ -84,17 +79,17 @@ class Model(BenchmarkModel):
     def get_module(self):
         return self.model, self.example_inputs
 
-    def train(self):
+    def train(self, niter=1):
         # the training process is not patched to use scripted models
-        return self.training_loop()
+        return self.training_loop(niter)
 
-    def eval(self) -> Tuple[torch.Tensor]:
+    def eval(self, niter=1) -> Tuple[torch.Tensor]:
         model, example_inputs = self.get_module()
-        with self.amp_context():
+        for i in range(niter):
             out = model(*example_inputs, augment=False)
-        pred = out[0]
-        # Apply NMS
-        pred = non_max_suppression(pred, 0.3, 0.6,
+            pred = out[0]
+            # Apply NMS
+            pred = non_max_suppression(pred, 0.3, 0.6,
                                     multi_label=False, classes=None, agnostic=False)
         return (out[0],) + out[1]
 

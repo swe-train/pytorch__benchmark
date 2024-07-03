@@ -6,7 +6,6 @@
 
 import math
 
-import torch
 import torch as th
 from torch import Tensor, nn
 
@@ -22,7 +21,7 @@ class BLSTM(nn.Module):
         self.lstm.flatten_parameters()
         self.linear = nn.Linear(2 * dim, dim)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x):
         x = x.permute(2, 0, 1)
         x = self.lstm(x)[0]
         x = self.linear(x)

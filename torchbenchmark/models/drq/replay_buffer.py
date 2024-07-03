@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class ReplayBuffer:
+class ReplayBuffer(object):
     """Buffer to store environment transitions."""
     def __init__(self, obs_shape, action_shape, capacity, image_pad, device):
         self.capacity = capacity

@@ -213,8 +213,6 @@ def prepare_training_loop(args):
         # Dataloader
         batch_size = min(batch_size, len(dataset))
         nw = min([os.cpu_count(), batch_size if batch_size > 1 else 0, 8])  # number of workers
-        # load with single process
-        nw = 0
         dataloader = torch.utils.data.DataLoader(dataset,
                                                 batch_size=batch_size,
                                                 num_workers=nw,
@@ -232,9 +230,10 @@ def prepare_training_loop(args):
                                                 num_workers=nw,
                                                 pin_memory=True,
                                                 collate_fn=dataset.collate_fn)
+
         # TorchBench: prefetch the dataloader
         if opt.prefetch:
-            dataloader = _prefetch_loader(dataloader, size=opt.train_num_batch*batch_size,
+            dataloader = _prefetch_loader(dataloader, size=opt.train_num_batch*batch_size, 
                                           fields=[0, 1],
                                           collate_fn=lambda x: x.to(device) if isinstance(x, torch.Tensor) else x)
 
@@ -247,7 +246,7 @@ def prepare_training_loop(args):
         # Model EMA
         ema = torch_utils.ModelEMA(model)
 
-        def train_loop(epochs=1):
+        def train_loop(epochs):
             epoch = 0
             nonlocal img_size, best_fitness
             # Start training
@@ -413,8 +412,7 @@ def prepare_training_loop(args):
             #     plot_results()  # save as results.png
             # print('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
             # dist.destroy_process_group() if torch.cuda.device_count() > 1 else None
-            # torchbench: disable empty cache
-            # torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
             return results
         return train_loop, model, dataloader
 

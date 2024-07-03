@@ -1,3 +1,0 @@
-test: eval
-model: resnet50,mobilenet_v2
-extra_args: --backend torchscript --fuser fuser3

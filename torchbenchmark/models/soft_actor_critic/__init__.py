@@ -121,8 +121,8 @@ class Model(BenchmarkModel):
     DEFAULT_EVAL_BSIZE = 256
     ALLOW_CUSTOMIZE_BSIZE = False
 
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
+        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
 
         self.args = SACConfig()
         self.args.batch_size = self.batch_size
@@ -140,7 +140,6 @@ class Model(BenchmarkModel):
             buffer_t = ReplayBuffer
         self.buffer = buffer_t(
             self.args.buffer_size,
-            device=self.device,
             state_shape=self.train_env.observation_space.shape,
             state_dtype=float,
             action_shape=(1,),
@@ -185,9 +184,9 @@ class Model(BenchmarkModel):
 
     def get_module(self):
         model = self.agent.actor
-        state, _info = self.train_env.reset()
+        state = self.train_env.reset()
         action = self.agent.sample_action(state)
-        next_state, reward, done, info, _unused = self.train_env.step(action)
+        next_state, reward, done, info = self.train_env.step(action)
         self.buffer.push(state, action, reward, next_state, done)
         batch = self.buffer.sample(self.args.batch_size)
         state_batch, action_batch, reward_batch, next_state_batch, done_batch = batch
@@ -197,18 +196,17 @@ class Model(BenchmarkModel):
     def set_module(self, new_model):
         self.agent.actor = new_model
         
-    def train(self):
+    def train(self, niter=1):
         # Setup
         self.target_agent.train()
         done = True
-        niter = 1
         for step in range(niter):
             if done:
-                state, _info = self.train_env.reset()
+                state = self.train_env.reset()
                 steps_this_ep = 0
                 done = False
             action = self.agent.sample_action(state)
-            next_state, reward, done, info, _unused = self.train_env.step(action)
+            next_state, reward, done, info = self.train_env.step(action)
             self.buffer.push(state, action, reward, next_state, done)
             state = next_state
             steps_this_ep += 1
@@ -237,27 +235,20 @@ class Model(BenchmarkModel):
                 soft_update(self.target_agent.critic1, self.agent.critic1, self.args.tau)
                 soft_update(self.target_agent.critic2, self.agent.critic2, self.args.tau)
 
-    def eval(self) -> Tuple[torch.Tensor]:
-        niter = 1
+    def eval(self, niter=1) -> Tuple[torch.Tensor]:
         with torch.no_grad():
             discount= 1.0
             episode_return_history = []
             for episode in range(niter):
                 episode_return = 0.0
-                state, _info = self.test_env.reset()
+                state = self.test_env.reset()
                 done, info = False, {}
                 for step_num in range(self.args.max_episode_steps):
                     if done:
                         break
                     action = self.agent.forward(state)
-                    state, reward, done, info, _unused = self.test_env.step(action)
+                    state, reward, done, info = self.test_env.step(action)
                     episode_return += reward * (discount ** step_num)
                 episode_return_history.append(episode_return)
             retval = torch.tensor(episode_return_history)
         return (torch.tensor(action), )
-
-    def get_optimizer(self):
-        return (self.actor_optimizer, self.critic_optimizer, self.log_alpha_optimizer)
-
-    def set_optimizer(self, optimizer) -> None:
-        self.actor_optimizer, self.critic_optimizer, self.log_alpha_optimizer = optimizer

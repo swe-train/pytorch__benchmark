@@ -21,10 +21,9 @@ class Model(BenchmarkModel):
     task = REINFORCEMENT_LEARNING.OTHER_RL
     DEFAULT_TRAIN_BSIZE = 96
     DEFAULT_EVAL_BSIZE = 96
-    CANNOT_SET_CUSTOM_OPTIMIZER = True
 
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
+        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
         # Train: These options are from source code.
         # Source: https://arxiv.org/pdf/1903.04411.pdf
         # Code: https://github.com/megvii-research/ICCV2019-LearningToPaint/blob/master/baseline/train.py
@@ -74,33 +73,41 @@ class Model(BenchmarkModel):
     def set_module(self, new_model):
         self.agent.actor = new_model
 
-    def train(self):
+    def train(self, niter=1):
         episode = episode_steps = 0
-        episode_steps += 1
-        if self.observation is None:
-            self.observation = self.env.reset()
-            self.agent.reset(self.observation, self.args.noise_factor)
-        action = self.agent.select_action(self.observation, noise_factor=self.args.noise_factor)
-        self.observation, reward, done, _ = self.env.step(action)
-        self.agent.observe(reward, self.observation, done, self.step)
-        if (episode_steps >= self.args.max_step and self.args.max_step):
-            # [optional] evaluate
-            if episode > 0 and self.args.validate_interval > 0 and \
-               episode % self.args.validate_interval == 0:
-                reward, dist = self.evaluate(self.env, self.agent.select_action)
-            tot_Q = 0.
-            tot_value_loss = 0.
-            lr = (3e-4, 1e-3)
-            for i in range(self.args.episode_train_times):
-                Q, value_loss = self.agent.update_policy(lr)
-                tot_Q += Q.data.cpu().numpy()
-                tot_value_loss += value_loss.data.cpu().numpy()
-            # reset
-            self.observation = None
-            episode_steps = 0
-            episode += 1
-        self.step += 1
+        for _ in range(niter):
+            episode_steps += 1
+            if self.observation is None:
+                self.observation = self.env.reset()
+                self.agent.reset(self.observation, self.args.noise_factor)
+            action = self.agent.select_action(self.observation, noise_factor=self.args.noise_factor)
+            self.observation, reward, done, _ = self.env.step(action)
+            self.agent.observe(reward, self.observation, done, self.step)
+            if (episode_steps >= self.args.max_step and self.args.max_step):
+                # [optional] evaluate
+                if episode > 0 and self.args.validate_interval > 0 and \
+                        episode % self.args.validate_interval == 0:
+                    reward, dist = self.evaluate(self.env, self.agent.select_action)
+                tot_Q = 0.
+                tot_value_loss = 0.
+                lr = (3e-4, 1e-3)
+                for i in range(self.args.episode_train_times):
+                    Q, value_loss = self.agent.update_policy(lr)
+                    tot_Q += Q.data.cpu().numpy()
+                    tot_value_loss += value_loss.data.cpu().numpy()
+                # reset
+                self.observation = None
+                episode_steps = 0
+                episode += 1
+            self.step += 1
 
-    def eval(self) -> Tuple[torch.Tensor]:
-        reward, dist = self.evaluate(self.env, self.agent.select_action)
+    def eval(self, niter=1) -> Tuple[torch.Tensor]:
+        for _ in range(niter):
+            reward, dist = self.evaluate(self.env, self.agent.select_action)
         return (torch.tensor(reward), torch.tensor(dist))
+
+    def _set_mode(self, train):
+        if train:
+            self.agent.train()
+        else:
+            self.agent.eval()

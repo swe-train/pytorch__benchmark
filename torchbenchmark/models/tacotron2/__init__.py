@@ -6,7 +6,6 @@ from .text import symbols
 from pathlib import Path
 from ...util.model import BenchmarkModel
 from typing import Tuple
-from contextlib import nullcontext
 from torchbenchmark.tasks import SPEECH
 
 
@@ -20,12 +19,12 @@ class Model(BenchmarkModel):
     # Tacotron2 CUDA inference test uses amp precision
     DEFAULT_EVAL_CUDA_PRECISION = "amp"
 
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
+        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
 
-        if device == 'cpu':
+        if device == 'cpu' or jit:
             # TODO - currently load_model assumes cuda
-            raise NotImplementedError("Tacotron2 doesn't support CPU because load_model assumes CUDA.")
+            raise NotImplementedError("Tacotron2 doesn't support CPU or JIT because load_model assumes CUDA")
 
         self.hparams = self.create_hparams(batch_size=self.batch_size)
         self.model = load_model(self.hparams).to(device=device)
@@ -35,7 +34,6 @@ class Model(BenchmarkModel):
         self.criterion = Tacotron2Loss().to(device=device)
         loader, valset, collate_fn = prepare_dataloaders(self.hparams)
         self.example_inputs, self.target = self.model.parse_batch(next(iter(loader)), device=self.device)
-        self.amp_context = nullcontext
 
     # Parameters were obtained from the source code.
     # Source: https://github.com/NVIDIA/tacotron2/blob/bb6761349354ee914909a42208e4820929612069/hparams.py#L5
@@ -125,17 +123,18 @@ class Model(BenchmarkModel):
     def get_module(self):
         return self.model, (self.example_inputs,)
 
-    def train(self):
+    def train(self, niter=1):
         self.model.train()
-        self.model.zero_grad()
-        y_pred = self.model(self.example_inputs)
+        for _ in range(niter):
+            self.model.zero_grad()
+            y_pred = self.model(self.example_inputs)
 
-        loss = self.criterion(y_pred, self.target)
-        loss.backward()
-        self.optimizer.step()
+            loss = self.criterion(y_pred, self.target)
+            loss.backward()
+            self.optimizer.step()
 
-    def eval(self) -> Tuple[torch.Tensor]:
+    def eval(self, niter=1) -> Tuple[torch.Tensor]:
         self.model.eval()
-        with self.amp_context():
+        for _ in range(niter):
             out = self.model(self.example_inputs)
         return out

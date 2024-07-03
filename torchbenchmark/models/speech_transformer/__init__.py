@@ -9,8 +9,6 @@
 import os
 import itertools
 import torch
-# set KALDI_ROOT to avoid spam message
-os.environ["KALDI_ROOT"] = "/tmp"
 
 from .config import SpeechTransformerTrainConfig, SpeechTransformerEvalConfig
 from ...util.model import BenchmarkModel
@@ -24,13 +22,12 @@ class Model(BenchmarkModel):
     task = SPEECH.RECOGNITION
     # Original batch size: 32
     # Source: https://github.com/kaituoxu/Speech-Transformer/blob/e6847772d6a786336e117a03c48c62ecbf3016f6/src/bin/train.py#L68
-    # This model does not support batch size customization
+    # This model does not support adjusting eval bs
     DEFAULT_TRAIN_BSIZE = 32
     DEFAULT_EVAL_BSIZE = 1
-    ALLOW_CUSTOMIZE_BSIZE = False
 
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
+        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
         self.traincfg = SpeechTransformerTrainConfig(prefetch=True, train_bs=self.batch_size, num_train_batch=NUM_TRAIN_BATCH, device=self.device)
         if test == "train":
             self.traincfg.model.to(self.device)
@@ -54,20 +51,13 @@ class Model(BenchmarkModel):
         elif self.test == "eval":
             self.evalcfg.model = new_model
 
-    def train(self):
-        self.traincfg.train(epoch=1)
+    def train(self, niter=1):
+        for i in range(niter):
+            self.traincfg.train(epoch = i)
 
-    def eval(self) -> Tuple[torch.Tensor]:
-        out = self.evalcfg.eval()
+    def eval(self, niter=1) -> Tuple[torch.Tensor]:
+        for _ in range(niter):
+            out = self.evalcfg.eval()
         # only the first element of model output is a tensor
         out = tuple(itertools.chain(*list(map(lambda x: x.values(), out))))
         return (out[0], )
-
-    def get_optimizer(self):
-        return self.traincfg.get_optimizer()
-
-    def set_optimizer(self, optimizer) -> None:
-        return self.traincfg.set_optimizer(optimizer)
-
-    def set_raw_optimizer(self, optimizer) -> None:
-        return self.traincfg.set_raw_optimizer(optimizer)

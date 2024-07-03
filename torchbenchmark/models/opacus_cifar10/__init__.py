@@ -16,12 +16,8 @@ class Model(BenchmarkModel):
     DEFAULT_TRAIN_BSIZE = 64
     DEFAULT_EVAL_BSIZE = 64
 
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        # disable torchdynamo-fx2trt because it never terminates
-        if "--torchdynamo" in extra_args and "fx2trt" in extra_args:
-            raise NotImplementedError("TorchDynamo Fx2trt is not supported because of hanging issue. "
-                                      "See: https://github.com/facebookresearch/torchdynamo/issues/109")
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
+        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
 
         self.model = models.resnet18(num_classes=10)
         self.model = ModuleValidator.fix(self.model)
@@ -33,10 +29,7 @@ class Model(BenchmarkModel):
         )
         self.example_target = torch.randint(0, 10, (self.batch_size,), device=self.device)
         dataset = data.TensorDataset(self.example_inputs[0], self.example_target)
-        self.dummy_loader = data.DataLoader(dataset, batch_size=self.batch_size)
-        self.noise_multiplier: float=1.0
-        self.max_grad_norm: float=1.0
-        self.poisson_sampling: bool=False
+        dummy_loader = data.DataLoader(dataset, batch_size=self.batch_size)
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
         self.criterion = nn.CrossEntropyLoss()
@@ -45,30 +38,18 @@ class Model(BenchmarkModel):
         self.model, self.optimizer, _ = self.privacy_engine.make_private(
             module=self.model,
             optimizer=self.optimizer,
-            data_loader=self.dummy_loader,
-            noise_multiplier=self.noise_multiplier,
-            max_grad_norm=self.max_grad_norm,
-            poisson_sampling=self.poisson_sampling,
-        )
-
-    def get_module(self):
-        return self.model, self.example_inputs
-
-    def get_optimizer(self):
-        return self.optimizer
-
-    def set_optimizer(self, optimizer) -> None:
-        self.optimizer = optimizer
-        self.model, self.optimizer, _ = self.privacy_engine.make_private(
-            module=self.model,
-            optimizer=self.optimizer,
-            data_loader=self.dummy_loader,
+            data_loader=dummy_loader,
             noise_multiplier=1.0,
             max_grad_norm=1.0,
             poisson_sampling=False,
         )
 
-    def train(self):
+    def get_module(self):
+        return self.model, self.example_inputs
+
+    def train(self, niter=1):
+        if niter != 1:
+            raise NotImplementedError("niter not implemented")
         model = self.model
         (images, ) = self.example_inputs
         model.train()
@@ -80,7 +61,9 @@ class Model(BenchmarkModel):
         self.optimizer.step()
         self.optimizer.zero_grad()
 
-    def eval(self) -> Tuple[torch.Tensor]:
+    def eval(self, niter=1) -> Tuple[torch.Tensor]:
+        if niter != 1:
+            raise NotImplementedError("niter not implemented")
         model = self.model
         (images, ) = self.example_inputs
         model.eval()

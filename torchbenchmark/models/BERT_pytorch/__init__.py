@@ -74,10 +74,8 @@ class Model(BenchmarkModel):
     DEFAULT_TRAIN_BSIZE = 16
     DEFAULT_EVAL_BSIZE = 16
 
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        if device == "cpu":
-            self.DEFAULT_EVAL_BSIZE = max(1, int(self.DEFAULT_EVAL_BSIZE / 8))
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, test, device, batch_size=None, jit=False, extra_args=[]):
+        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
         debug_print = False
         root = str(Path(__file__).parent)
         args = parse_args(args=[
@@ -86,8 +84,8 @@ class Model(BenchmarkModel):
             '--vocab_path', f'{root}/data/vocab.small',
             '--output_path', 'bert.model',
         ]) # Avoid reading sys.argv here
-        args.device = self.device
-        args.script = False
+        args.with_cuda = self.device == 'cuda'
+        args.script = self.jit
         args.on_memory = True
 
         # Example effect of batch size on eval time(ms)
@@ -147,10 +145,7 @@ class Model(BenchmarkModel):
 
         trainer = BERTTrainer(bert, len(vocab), train_dataloader=train_data_loader, test_dataloader=test_data_loader,
                                    lr=args.lr, betas=(args.adam_beta1, args.adam_beta2), weight_decay=args.adam_weight_decay,
-                                   device=args.device, device_ids=args.device_ids, log_freq=args.log_freq, debug=args.debug)
-
-        if test == "eval":
-            bert.eval()
+                                   with_cuda=args.with_cuda, cuda_devices=args.cuda_devices, log_freq=args.log_freq, debug=args.debug)
 
         example_batch = next(iter(train_data_loader))
         self.example_inputs = example_batch['bert_input'].to(self.device)[:self.batch_size], example_batch['segment_label'].to(self.device)[:self.batch_size]
@@ -164,42 +159,34 @@ class Model(BenchmarkModel):
     def set_module(self, new_model):
         self.model.bert = new_model
 
-    def eval(self) -> typing.Tuple[torch.Tensor]:
+    def eval(self, niter=1) -> typing.Tuple[torch.Tensor]:
         model = self.model
-        # 1. forward the next_sentence_prediction and masked_lm model
-        next_sent_output, mask_lm_output = model.model.forward(*self.example_inputs)
+        for _ in range(niter):
+            # 1. forward the next_sentence_prediction and masked_lm model
+            next_sent_output, mask_lm_output = model.model.forward(*self.example_inputs)
 
-        # 2-1. NLL(negative log likelihood) loss of is_next classification result
-        # 2-2. NLLLoss of predicting masked token word
-        # 2-3. Adding next_loss and mask_loss : 3.4 Pre-training Procedure
-        next_loss = model.criterion(next_sent_output, self.is_next)
-        mask_loss = model.criterion(mask_lm_output.transpose(1, 2), self.bert_label)
-        loss = next_loss + mask_loss
+            # 2-1. NLL(negative log likelihood) loss of is_next classification result
+            # 2-2. NLLLoss of predicting masked token word
+            # 2-3. Adding next_loss and mask_loss : 3.4 Pre-training Procedure
+            next_loss = model.criterion(next_sent_output, self.is_next)
+            mask_loss = model.criterion(mask_lm_output.transpose(1, 2), self.bert_label)
+            loss = next_loss + mask_loss
         return (next_sent_output, mask_lm_output)
 
-    def train(self):
+    def train(self, niter=1):
         trainer = self.model
-        # 1. forward the next_sentence_prediction and masked_lm model
-        next_sent_output, mask_lm_output = trainer.model.forward(*self.example_inputs)
+        for _ in range(niter):
+            # 1. forward the next_sentence_prediction and masked_lm model
+            next_sent_output, mask_lm_output = trainer.model.forward(*self.example_inputs)
 
-        # 2-1. NLL(negative log likelihood) loss of is_next classification result
-        # 2-2. NLLLoss of predicting masked token word
-        # 2-3. Adding next_loss and mask_loss : 3.4 Pre-training Procedure
-        next_loss = trainer.criterion(next_sent_output, self.is_next)
-        mask_loss = trainer.criterion(mask_lm_output.transpose(1, 2), self.bert_label)
-        loss = next_loss + mask_loss
+            # 2-1. NLL(negative log likelihood) loss of is_next classification result
+            # 2-2. NLLLoss of predicting masked token word
+            # 2-3. Adding next_loss and mask_loss : 3.4 Pre-training Procedure
+            next_loss = trainer.criterion(next_sent_output, self.is_next)
+            mask_loss = trainer.criterion(mask_lm_output.transpose(1, 2), self.bert_label)
+            loss = next_loss + mask_loss
 
-        # 3. backward and optimization only in train
-        trainer.optim_schedule.zero_grad()
-        loss.backward()
-        trainer.optim_schedule.step_and_update_lr()
-
-    # self.model is a Trainer that has an inner optimizer wrapped by a scheduled optimizer. Return the inner,
-    # since the scheduled is derived.
-    def get_optimizer(self):
-        return self.model.get_optimizer()
-
-    # self.model is a Trainer that has an inner optimizer wrapped by a scheduled optimizer. Update both with
-    # a new inner optimizer.
-    def set_optimizer(self, optimizer: torch.optim.Optimizer) -> None:
-        self.model.set_optimizer(optimizer)
+            # 3. backward and optimization only in train
+            trainer.optim_schedule.zero_grad()
+            loss.backward()
+            trainer.optim_schedule.step_and_update_lr()

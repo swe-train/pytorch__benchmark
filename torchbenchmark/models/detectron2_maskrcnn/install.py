@@ -1,8 +1,16 @@
 import os
-from torchbenchmark.util.framework.detectron2 import install_detectron2
+import sys
+from pathlib import Path
+import subprocess
 
-MODEL_NAME = os.path.basename(os.path.dirname(os.path.abspath(__file__)))
-MODEL_DIR = os.path.abspath(os.path.dirname(__file__))
+def check_data_dir():
+    current_dir = Path(os.path.dirname(os.path.realpath(__file__)))
+    coco2017_data_dir = os.path.join(current_dir.parent.parent, "data", ".data", "coco2017-minimal")
+    assert os.path.exists(coco2017_data_dir), "Couldn't find coco2017 minimal data dir, please run install.py again."
+
+def pip_install_requirements():
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', '-r', 'requirements.txt'])
 
 if __name__ == '__main__':
-    install_detectron2(MODEL_NAME, MODEL_DIR)
+    check_data_dir()
+    pip_install_requirements()

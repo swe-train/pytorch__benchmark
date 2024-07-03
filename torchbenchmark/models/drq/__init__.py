@@ -13,7 +13,7 @@ from gym import spaces
 from ...util.model import BenchmarkModel
 from torchbenchmark.tasks import REINFORCEMENT_LEARNING
 
-from .drqutils import FrameStack, set_seed_everywhere, eval_mode
+from .utils import FrameStack, set_seed_everywhere, eval_mode
 from .drq import DRQAgent
 from .config import DRQConfig
 from .replay_buffer import ReplayBuffer
@@ -88,12 +88,9 @@ class Model(BenchmarkModel):
     DEFAULT_TRAIN_BSIZE = 1
     DEFAULT_EVAL_BSIZE = 1
     ALLOW_CUSTOMIZE_BSIZE = False
-    CANNOT_SET_CUSTOM_OPTIMIZER = True
-    # this model will cause infinite loop if deep-copied
-    DEEPCOPY = False
 
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
+        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
 
         self.cfg = DRQConfig()
         set_seed_everywhere(self.cfg.seed)
@@ -120,15 +117,15 @@ class Model(BenchmarkModel):
     def set_module(self, new_model):
         self.agent.actor = new_model
 
-    def train(self):
+    def train(self, niter=2):
         episode, episode_reward, episode_step, done = 0, 0, 1, True
-        if True:
+        for step in range(niter):
             obs = self.env.reset()
             done = False
             episode_reward = 0
             episode_step = 0
             episode += 1
-            if self.step < self.cfg.num_seed_steps:
+            if step < self.cfg.num_seed_steps:
                 action = self.env.action_space.sample()
             else:
                 with eval_mode(self.agent):
@@ -149,10 +146,9 @@ class Model(BenchmarkModel):
             episode_step += 1
             self.step += 1
 
-    def eval(self) -> Tuple[torch.Tensor]:
+    def eval(self, niter=1) -> Tuple[torch.Tensor]:
         average_episode_reward = 0
-        steps = 0
-        if True:
+        for _episode in range(niter):
             obs = self.env.reset()
             episode_reward = 0
             episode_step = 0
@@ -162,6 +158,5 @@ class Model(BenchmarkModel):
             episode_reward += reward
             episode_step += 1
             average_episode_reward += episode_reward
-            steps += 1
-        average_episode_reward /= float(steps)
+        average_episode_reward /= float(niter)
         return (torch.Tensor(action), )

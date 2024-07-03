@@ -45,23 +45,14 @@ def _prefetch(loader, device):
 
 class Model(BenchmarkModel):
     task = COMPUTER_VISION.DETECTION
-    # MaskRCNN doesn't actually take the inputs in batches; it takes a list
-    # of tensors which individually are CHW
-    DEFAULT_TRAIN_BSIZE = 1
-    DEFAULT_EVAL_BSIZE = 1
-    NUM_OF_BATCHES = 1
-    ALLOW_CUSTOMIZE_BSIZE = False
+    optimized_for_inference = True
+    DEFAULT_TRAIN_BSIZE = 4
+    DEFAULT_EVAL_BSIZE = 4
 
-    def __init__(self, test, device, batch_size=None, extra_args=[], model_kwargs={}):
-        # reduce the eval batch size when running on CPU
-        # see: https://github.com/pytorch/benchmark/issues/895
-        if device == "cpu":
-            self.DEFAULT_EVAL_BSIZE = 1
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
+        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
 
-        self.model = torchvision.models.detection.maskrcnn_resnet50_fpn(
-            weights=torchvision.models.detection.MaskRCNN_ResNet50_FPN_Weights.COCO_V1, **model_kwargs
-        ).to(self.device)
+        self.model = torchvision.models.detection.maskrcnn_resnet50_fpn(pretrained=True).to(self.device)
         # setup optimizer
         # optimizer parameters copied from
         # https://github.com/pytorch/vision/blob/30f4d108319b0cd28ae5662947e300aad98c32e9/references/detection/train.py#L77
@@ -76,6 +67,7 @@ class Model(BenchmarkModel):
                                 annFile=os.path.join(DATA_DIR, COCO_DATA[COCO_DATA_KEY][1]),
                                 transforms=transforms)
         sampler = torch.utils.data.SequentialSampler(dataset)
+
         self.data_loader = _prefetch(torch.utils.data.DataLoader(dataset, batch_size=self.batch_size,
                                                                       sampler=sampler,
                                                                       collate_fn=_collate_fn), self.device)
@@ -85,9 +77,9 @@ class Model(BenchmarkModel):
         for (example_inputs, _example_targets) in self.data_loader:
             return self.model, (example_inputs, )
 
-    def train(self):
+    def train(self, niter=1):
         self.model.train()
-        for _batch_id, (images, targets) in zip(range(self.NUM_OF_BATCHES), self.data_loader):
+        for _, (images, targets) in zip(range(niter), self.data_loader):
             # images = list(image.to(self.device) for image in images)
             # targets = [{k: v.to(self.device) for k, v in t.items()} for t in targets]
             loss_dict = self.model(images, targets)
@@ -96,10 +88,10 @@ class Model(BenchmarkModel):
             losses.backward()
             self.optimizer.step()
 
-    def eval(self) -> Tuple[torch.Tensor]:
+    def eval(self, niter=1) -> Tuple[torch.Tensor]:
         self.model.eval()
         with torch.no_grad():
-            for _batch_id, (images, _targets) in zip(range(self.NUM_OF_BATCHES), self.data_loader):
+            for _, (images, _targets) in zip(range(niter), self.data_loader):
                 out = self.model(images)
         out = list(map(lambda x: x.values(), out))
         return tuple(itertools.chain(*out))

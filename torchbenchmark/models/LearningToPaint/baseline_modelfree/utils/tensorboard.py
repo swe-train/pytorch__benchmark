@@ -4,7 +4,7 @@ from io import BytesIO
 import tensorboardX as tb
 from tensorboardX.summary import Summary
 
-class TensorBoard:
+class TensorBoard(object):
     def __init__(self, model_dir):
         self.summary_writer = tb.FileWriter(model_dir)
 

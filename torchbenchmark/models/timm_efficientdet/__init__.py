@@ -23,20 +23,9 @@ from .args import get_args
 from .train import train_epoch, validate
 from .loader import create_datasets_and_loaders
 
-from torch.utils._pytree import tree_map
-
-from typing import Tuple
-
 # setup coco2017 input path
 CURRENT_DIR = Path(os.path.dirname(os.path.realpath(__file__)))
 DATA_DIR = os.path.join(CURRENT_DIR.parent.parent, "data", ".data", "coco2017-minimal", "coco")
-
-def prefetch(loader, device, num_of_batches):
-    prefetched_loader = []
-    for _bid, (input, target) in zip(range(num_of_batches), loader):
-        prefetched_loader.append((tree_map(lambda x: x.to(device, dtype=torch.float32) if isinstance(x, torch.Tensor) else x, input),
-                                 tree_map(lambda x: x.to(device, dtype=torch.float32) if isinstance(x, torch.Tensor) else x, target)))
-    return prefetched_loader
 
 class Model(BenchmarkModel):
     task = COMPUTER_VISION.DETECTION
@@ -44,11 +33,9 @@ class Model(BenchmarkModel):
     # Downscale to batch size 16 on single GPU
     DEFAULT_TRAIN_BSIZE = 16
     DEFAULT_EVAL_BSIZE = 128
-    # prefetch only 1 batch
-    NUM_OF_BATCHES = 1
 
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
+        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
         if not device == "cuda":
             # Only implemented on CUDA because the original model code explicitly calls the `Tensor.cuda()` API
             # https://github.com/rwightman/efficientdet-pytorch/blob/9cb43186711d28bd41f82f132818c65663b33c1f/effdet/data/loader.py#L114
@@ -60,7 +47,7 @@ class Model(BenchmarkModel):
         # Disable distributed
         args.distributed = False
         args.device = self.device
-        args.torchscript = False
+        args.torchscript = self.jit
         args.world_size = 1
         args.rank = 0
         args.pretrained_backbone = not args.no_pretrained_backbone
@@ -120,9 +107,6 @@ class Model(BenchmarkModel):
             if model_config.num_classes > self.loader_train.dataset.parser.max_label:
                 logging.warning(
                     f'Model {model_config.num_classes} has more classes than dataset {self.loader_train.dataset.parser.max_label}.')
-            self.loader_train = prefetch(self.loader_train, self.device, self.NUM_OF_BATCHES)
-            self.loader_eval = prefetch(self.loader_eval, self.device, self.NUM_OF_BATCHES)
-            self.loader = self.loader_train
         elif test == "eval":
             # Create eval loader
             input_config = resolve_input_config(args, model_config)
@@ -137,30 +121,20 @@ class Model(BenchmarkModel):
                     std=input_config['std'],
                     num_workers=args.workers,
                     pin_mem=args.pin_mem)
-            self.loader = prefetch(self.loader, self.device, self.NUM_OF_BATCHES)
         self.args = args
-        # Only run 1 epoch
+        # Only run 1 batch in 1 epoch
+        self.num_batches = 1
         self.num_epochs = 1
 
     def get_module(self):
-        for _, (input, target) in zip(range(self.NUM_OF_BATCHES), self.loader):
+        for _, (input, target) in zip(range(self.num_batches), self.loader):
             return self.model, (input, target)
 
-    def get_optimizer(self):
-        return self.optimizer
-
-    def set_optimizer(self, optimizer) -> None:
-        self.optimizer = optimizer
-        self.lr_scheduler, self.num_epochs = create_scheduler(args, self.optimizer)
-
     def enable_amp(self):
-        if self.device == "cuda":
-            self.amp_autocast = torch.cuda.amp.autocast
-        elif self.device == "cpu":
-            self.amp_autocast = torch.cpu.amp.autocast
+        self.amp_autocast = torch.cuda.amp.autocast
         self.loss_scaler = NativeScaler()
 
-    def train(self):
+    def train(self, niter=1):
         eval_metric = self.args.eval_metric
         for epoch in range(self.num_epochs):
             train_metrics = train_epoch(
@@ -168,22 +142,21 @@ class Model(BenchmarkModel):
                 self.optimizer, self.args,
                 lr_scheduler=self.lr_scheduler, amp_autocast = self.amp_autocast,
                 loss_scaler=self.loss_scaler, model_ema=self.model_ema,
-                num_batch=self.NUM_OF_BATCHES,
+                num_batch=self.num_batches,
             )
-            # TorchBench: skip validation step in train
             # the overhead of evaluating with coco style datasets is fairly high, so just ema or non, not both
-            # if self.model_ema is not None:
-            #     eval_metrics = validate(self.model_ema.module, self.loader_eval, self.args, self.evaluator, log_suffix=' (EMA)', num_batch=self.NUM_OF_BATCHES)
-            # else:
-            #     eval_metrics = validate(self.model, self.loader_eval, self.args, self.evaluator, num_batch=self.NUM_OF_BATCHES)
-            # if self.lr_scheduler is not None:
-                # # step LR for next epoch
-                # self.lr_scheduler.step(epoch + 1, eval_metrics[eval_metric])
+            if self.model_ema is not None:
+                eval_metrics = validate(self.model_ema.module, self.loader_eval, self.args, self.evaluator, log_suffix=' (EMA)', num_batch=self.num_batches)
+            else:
+                eval_metrics = validate(self.model, self.loader_eval, self.args, self.evaluator, num_batch=self.num_batches)
+            if self.lr_scheduler is not None:
+                # step LR for next epoch
+                self.lr_scheduler.step(epoch + 1, eval_metrics[eval_metric])
 
-    def eval(self) -> Tuple[torch.Tensor]:
-        with torch.no_grad():
-            for input, target in self.loader:
-                with self.amp_autocast():
-                    output = self.model(input, img_info=target)
-                self.evaluator.add_predictions(output, target)
-        return (output, )
+    def eval(self, niter=1):
+        for _ in range(niter):
+            with torch.no_grad():
+                for _, (input, target) in zip(range(self.num_batches), self.loader):
+                    with self.amp_autocast():
+                        output = self.model(input, img_info=target)
+                    self.evaluator.add_predictions(output, target)

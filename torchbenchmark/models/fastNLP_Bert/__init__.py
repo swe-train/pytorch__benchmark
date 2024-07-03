@@ -36,14 +36,14 @@ logger.setLevel(logging.WARNING)
 
 
 class Model(BenchmarkModel):
-    task = NLP.LANGUAGE_MODELING
+    task = NLP.OTHER_NLP
     # Use the train batch size from the original CMRC2018 Q&A task
     # Source: https://fastnlp.readthedocs.io/zh/latest/tutorials/extend_1_bert_embedding.html
     DEFAULT_TRAIN_BSIZE = 6
     DEFAULT_EVAL_BSIZE = 1
 
-    def __init__(self, test, device, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, batch_size=batch_size, extra_args=extra_args)
+    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
+        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
 
         self.input_dir = CMRC2018_DIR
         # Generate input data files
@@ -86,35 +86,41 @@ class Model(BenchmarkModel):
             self.model.eval()
             self.data = data_bundle.get_dataset('dev')
 
-        example_inputs = DataSetIter(dataset=self.data,
-                                     batch_size=self.batch_size,
-                                     sampler=None,
-                                     num_workers=self.num_workers, drop_last=False)
-        self.example_inputs = self._prefetch(example_inputs)
+        self.example_inputs = DataSetIter(dataset=self.data,
+                                          batch_size=self.batch_size,
+                                          sampler=None,
+                                          num_workers=self.num_workers, drop_last=False)
 
     def get_module(self):
-        batch_x, _batch_y = list(self.example_inputs)[0]
+        batch_x, batch_y = list(self.example_inputs)[0]
+        self._move_dict_value_to_device(batch_x, batch_y, device=self.device)
         return self.model, (batch_x["words"], )
 
     # Sliced version of fastNLP.Tester._test()
-    def eval(self) -> Tuple[torch.Tensor]:
+    def eval(self, niter=1) -> Tuple[torch.Tensor]:
         self._mode(self.model, is_test=True)
         self._predict_func = self.model.forward
         with torch.no_grad():
-            for batch_x, _batch_y in self.example_inputs:
-                pred_dict = self._data_forward(self._predict_func, batch_x)
+            for epoch in range(niter):
+                for batch_x, batch_y in self.example_inputs:
+                    self._move_dict_value_to_device(batch_x, batch_y, device=self.device)
+                    pred_dict = self._data_forward(self._predict_func, batch_x)
         # return a tuple of Tensors
         return (pred_dict['pred_start'], pred_dict['pred_end'] )
 
     # Sliced version of fastNLP.Trainer._train()
-    def train(self):
+    def train(self, niter=1):
         self.step = 0
-        self.n_epochs = 1
+        self.n_epochs = niter
         self._mode(self.model, is_test=False)
         self.callback_manager.on_train_begin()
-        for _epoch in range(self.n_epochs):
+        # Move the data to GPU before the train loop
+        for batch_x, batch_y in self.example_inputs:
+            self._move_dict_value_to_device(batch_x, batch_y, device=self.device)
+        for epoch in range(niter):
             self.callback_manager.on_epoch_begin()
             for batch_x, batch_y in self.example_inputs:
+                self._move_dict_value_to_device(batch_x, batch_y, device=self.device)
                 self.step += 1
                 prediction = self._data_forward(self.model, batch_x)
                 self.callback_manager.on_loss_begin(batch_y, prediction)
@@ -127,13 +133,6 @@ class Model(BenchmarkModel):
                 self.callback_manager.on_batch_end()
             self.callback_manager.on_epoch_end()
         self.callback_manager.on_train_end()
-
-    def _prefetch(self, example_inputs):
-        prefetched_data = []
-        for batch_x, batch_y in example_inputs:
-            self._move_dict_value_to_device(batch_x, batch_y, device=self.device)
-            prefetched_data.append((batch_x, batch_y))
-        return prefetched_data
 
     # Helper functions
     def _build_args(self, func, **kwargs):
@@ -150,6 +149,8 @@ class Model(BenchmarkModel):
         return output
 
     def _move_dict_value_to_device(self, *args, device, non_blocking=False):
+        if not torch.cuda.is_available() or device is None:
+            return
         for arg in args:
             if isinstance(arg, dict):
                 for key, value in arg.items():
@@ -213,13 +214,3 @@ class Model(BenchmarkModel):
         :return: a scalar
         """
         return self.losser(predict, truth)
-
-    def get_optimizer(self):
-        r"""Gets the optimizer if initiated"""
-        if hasattr(self, "optimizer"):
-            return self.optimizer
-        return None
-
-    def set_optimizer(self, optimizer) -> None:
-        r"""Sets the optimizer regardless of whether it's been initiated"""
-        self.optimizer = optimizer

@@ -8,10 +8,10 @@ tqdm
 inflect
 bokeh
 pysbd
+pyworld
 soundfile
 nose
 cardboardlint
 pylint
 gdown
 pyyaml
-librosa
