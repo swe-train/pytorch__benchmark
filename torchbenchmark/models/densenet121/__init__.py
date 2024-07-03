@@ -21,7 +21,7 @@ class Model(BenchmarkModel):
         self.jit = jit
         self.model = models.densenet121().to(self.device)
         self.eval_model = models.densenet121().to(self.device)
-        self.example_inputs = (torch.randn((32, 3, 224, 224)).to(self.device),)
+        self.example_inputs = (torch.randn((64, 3, 224, 224)).to(self.device),)
 
         if self.jit:
             self.model = torch.jit.script(self.model, example_inputs=[self.example_inputs, ])
@@ -53,7 +53,7 @@ class Model(BenchmarkModel):
     def eval(self, niter=1):
         model = self.eval_model
         example_inputs = self.example_inputs
-        example_inputs = example_inputs[0][0].unsqueeze(0)
+        example_inputs = example_inputs[0]
         for i in range(niter):
             model(example_inputs)
 
