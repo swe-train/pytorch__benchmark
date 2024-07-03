@@ -6,7 +6,10 @@ import dill as pickle
 from tqdm import tqdm
 
 import transformer.Constants as Constants
-from torchbenchmark.util.torchtext_legacy.data import Dataset
+try:
+  from torchtext.legacy.data import Dataset
+except ImportError:
+  from torchtext.data import Dataset
 from transformer.Models import Transformer
 from transformer.Translator import Translator
 

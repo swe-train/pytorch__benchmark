@@ -12,11 +12,12 @@ from tqdm import tqdm
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
-
-from torchbenchmark.util.torchtext_legacy.field import Field
-from torchbenchmark.util.torchtext_legacy.data import Dataset
-from torchbenchmark.util.torchtext_legacy.iterator import BucketIterator
-from torchbenchmark.util.torchtext_legacy.translation import TranslationDataset
+try:
+    from torchtext.legacy.data import Field, Dataset, BucketIterator
+    from torchtext.legacy.datasets.translation import TranslationDataset
+except ImportError:
+    from torchtext.data import Field, Dataset, BucketIterator
+    from torchtext.datasets import TranslationDataset
 
 from .transformer import Constants
 from .transformer.Models import Transformer
@@ -24,7 +25,10 @@ from .transformer.Optim import ScheduledOptim
 import random
 import numpy as np
 
-torch.backends.cudnn.deterministic = False
+torch.manual_seed(1337)
+random.seed(1337)
+np.random.seed(1337)
+torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
 __author__ = "Yu-Hsiang Huang"

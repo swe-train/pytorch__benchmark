@@ -1,21 +1,17 @@
 #!/bin/bash
-set -ex
+set -e
 
 . ~/miniconda3/etc/profile.d/conda.sh
+conda activate base
 
-if [[ -z "${CONDA_ENV}" ]]; then
-    conda activate base
-else
-    conda activate "${CONDA_ENV}"
-fi
+# conda install -y pytorch torchvision -c pytorch-nightly
+# Changing to pip to work around https://github.com/pytorch/pytorch/issues/49375
 
-conda install -y numpy requests ninja pyyaml setuptools gitpython beautifulsoup4 regex
-conda install -y -c pytorch magma-cuda116
+pip install --pre torch torchvision torchtext \
+    --progress-bar off \
+    -f https://download.pytorch.org/whl/nightly/cu111/torch_nightly.html
 
-# install the most recent successfully built pytorch packages
-# torchaudio is required by fairseq/fambench_xlmr
-pip install --pre torch torchvision torchtext torchaudio -f https://download.pytorch.org/whl/nightly/cu116/torch_nightly.html
-
+pip install -q numpy
 conda install -y expecttest -c conda-forge
 
 # Log final configuration

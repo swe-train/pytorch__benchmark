@@ -8,12 +8,12 @@ checking is only here to encourage reusing existing fields and avoiding typos.
 
 import argparse
 import time
-import multiprocessing
 import json
 import os
 import requests
 import subprocess
 from collections import defaultdict
+
 
 class ScribeUploader:
     def __init__(self, category):
@@ -88,7 +88,7 @@ class PytorchBenchmarkUploader(ScribeUploader):
                 'stddev', 'min', 'median', 'max', 'mean', 'runtime',
                 'torchbench_score',
                 'torchbench_score_jit_speedup',
-                'torchbench_subscore_cpu_train',
+                'torchbench_subscore_cpu_train', 
                 'torchbench_subscore_cpu_infer',
                 'torchbench_subscore_gpu_train',
                 'torchbench_subscore_gpu_infer',

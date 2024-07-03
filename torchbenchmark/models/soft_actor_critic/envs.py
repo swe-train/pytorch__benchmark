@@ -215,7 +215,7 @@ def add_gym_args(parser):
     """
     Add a --env_id cl flag to an argparser
     """
-    parser.add_argument("--env_id", type=str, default="Pendulum-v1")
+    parser.add_argument("--env_id", type=str, default="Pendulum-v0")
     parser.add_argument("--seed", type=int, default=123)
 
 
@@ -234,7 +234,7 @@ def load_gym(env_id="CartPole-v1", seed=None, normalize_action_space=True, **_):
         env = NormalizeContinuousActionSpace(env)
     if seed is None:
         seed = random.randint(1, 100000)
-    env.reset(seed=seed)
+    env.seed(seed)
     return env
 
 
@@ -292,7 +292,7 @@ def load_atari(
     env = gym.make(game_id)
     if seed is None:
         seed = random.randint(1, 100000)
-    env.reset(seed=seed)
+    env.seed(seed)
     env = gym.wrappers.AtariPreprocessing(
         env,
         noop_max=noop_max,

@@ -1,18 +1,18 @@
 from argparse import Namespace
 import math
 import time
-import os
 import dill as pickle
 from tqdm import tqdm
 
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
-
-from torchbenchmark.util.torchtext_legacy.field import Field
-from torchbenchmark.util.torchtext_legacy.data import Dataset
-from torchbenchmark.util.torchtext_legacy.iterator import BucketIterator
-from torchbenchmark.util.torchtext_legacy.translation import TranslationDataset
+try:
+    from torchtext.legacy.data import Field, Dataset, BucketIterator
+    from torchtext.legacy.datasets.translation import TranslationDataset
+except ImportError:
+    from torchtext.data import Field, Dataset, BucketIterator
+    from torchtext.datasets import TranslationDataset
 
 from .transformer import Constants
 from .transformer.Models import Transformer
@@ -24,17 +24,15 @@ from pathlib import Path
 from ...util.model import BenchmarkModel
 from torchbenchmark.tasks import NLP
 
-torch.backends.cudnn.deterministic = False
+torch.manual_seed(1337)
+random.seed(1337)
+np.random.seed(1337)
+torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
 class Model(BenchmarkModel):
     task = NLP.TRANSLATION
-    # Original batch size 256, hardware platform unknown
-    # Source: https://github.com/jadore801120/attention-is-all-you-need-pytorch/blob/132907dd272e2cc92e3c10e6c4e783a87ff8893d/README.md?plain=1#L83
-    DEFAULT_TRAIN_BSIZE = 256
-    DEFAULT_EVAL_BSIZE = 32
-    NUM_OF_BATCHES = 1
-    init_lr = 2.0
+    optimized_for_inference = True
 
     def _create_transformer(self):
         transformer = Transformer(
@@ -55,20 +53,13 @@ class Model(BenchmarkModel):
         
         return transformer
 
-    def _preprocess(self, data_iter):
-        preloaded_data = []
-        for d in data_iter:
-            src_seq = patch_src(d.src, self.opt.src_pad_idx).to(self.device)
-            trg_seq, gold = map(lambda x: x.to(self.device), patch_trg(d.trg, self.opt.trg_pad_idx))
-            preloaded_data.append((src_seq, trg_seq, gold))
-        return preloaded_data
-
-    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
-
-        root = os.path.join(str(Path(__file__).parent), ".data")
+    def __init__(self, device=None, jit=False):
+        super().__init__()
+        self.device = device
+        self.jit = jit
+        root = str(Path(__file__).parent)
         self.opt = Namespace(**{
-            'batch_size': self.batch_size,
+            'batch_size': 128,
             'd_inner_hid': 2048,
             'd_k': 64,
             'd_model': 512,
@@ -93,48 +84,48 @@ class Model(BenchmarkModel):
             'val_path': None,
         })
 
-        train_data, test_data = prepare_dataloaders(self.opt, self.device)
-        self.model = self._create_transformer()
+        _, validation_data = prepare_dataloaders(self.opt, self.device)
 
-        if test == "train":
-            self.model.train()
-            self.example_inputs = self._preprocess(train_data)
-            self.optimizer = ScheduledOptim(
-                optim.Adam(self.model.parameters(), betas=(0.9, 0.98), eps=1e-09),
-                self.init_lr, self.opt.d_model, self.opt.n_warmup_steps)
-        elif test == "eval":
-            self.model.eval()
-            self.example_inputs = self._preprocess(test_data)
+        transformer = self._create_transformer()
+        self.eval_model = self._create_transformer()
+        self.eval_model.eval()
+
+        batch = list(validation_data)[0]
+        src_seq = patch_src(batch.src, self.opt.src_pad_idx).to(self.device)
+        trg_seq, self.gold = map(lambda x: x.to(self.device), patch_trg(batch.trg, self.opt.trg_pad_idx))
+        # We use validation_data for training as well so that it can finish fast enough.
+        self.example_inputs = (src_seq, trg_seq)
+        if self.jit:
+            transformer = torch.jit.script(transformer, example_inputs = [self.example_inputs, ])
+            self.eval_model = torch.jit.script(self.eval_model, example_inputs = [self.example_inputs, ])
+            self.eval_model = torch.jit.optimize_for_inference(self.eval_model)
+        self.module = transformer
 
     def get_module(self):
-        for (src_seq, trg_seq, gold) in self.example_inputs:
-            return self.model, (*(src_seq, trg_seq), )
+        return self.module, self.example_inputs
 
-    def get_optimizer(self):
-        if hasattr(self, "optimizer"):
-            return self.optimizer
-        return None
+    def eval(self, niter=1):
+        self.module.eval()
+        for _ in range(niter):
+            self.eval_model(*self.example_inputs)
 
-    def set_optimizer(self, optimizer) -> None:
-        self.optimizer = optimizer
+    def train(self, niter=1):
+        optimizer = ScheduledOptim(
+            optim.Adam(self.module.parameters(), betas=(0.9, 0.98), eps=1e-09),
+            2.0, self.opt.d_model, self.opt.n_warmup_steps)
+        for _ in range(niter):
+            optimizer.zero_grad()
+            pred = self.module(*self.example_inputs)
 
-    # set_optimizer sets the optimizer to whatever you pass it. set_inner_optimizer will wrap your
-    # input optimizer with ScheduledOptim.
-    def set_inner_optimizer(self, optimizer: torch.optim.Optimizer) -> None:
-        self.optimizer = ScheduledOptim(optimizer, self.init_lr, self.opt.d_model, self.opt.n_warmup_steps)
-
-    def eval(self) -> torch.Tensor:
-        result = None
-        for _, (src_seq, trg_seq, gold) in zip(range(self.NUM_OF_BATCHES), self.example_inputs):
-            result = self.model(*(src_seq, trg_seq))
-        return (result, )
-
-    def train(self):
-        for _, (src_seq, trg_seq, gold) in zip(range(self.NUM_OF_BATCHES), self.example_inputs):
-            self.optimizer.zero_grad()
-            example_inputs = (src_seq, trg_seq)
-            pred = self.model(*example_inputs)
             loss, n_correct, n_word = cal_performance(
-                pred, gold, self.opt.trg_pad_idx, smoothing=self.opt.label_smoothing)
+                pred, self.gold, self.opt.trg_pad_idx, smoothing=self.opt.label_smoothing)
             loss.backward()
-            self.optimizer.step_and_update_lr()
+            optimizer.step_and_update_lr()
+
+
+if __name__ == '__main__':
+    m = Model(device='cuda', jit=False)
+    module, example_inputs = m.get_module()
+    module(*example_inputs)
+    m.train(niter=1)
+    m.eval(niter=1)

@@ -1,105 +1,83 @@
-"""
-pytorch_struct model, Unsupervised CFG task
-https://github.com/harvardnlp/pytorch-struct/blob/master/notebooks/Unsupervised_CFG.ipynb
-"""
-import os
-import pytest
 import torchtext
-import numpy as np
 import torch, random
-import torch_struct
+import numpy as np
+import pytest
 from torch_struct import SentCFG
-from .networks.NeuralCFG import NeuralCFG
-
-from torchbenchmark.util.torchtext_legacy.field import Field
-from torchbenchmark.util.torchtext_legacy.datasets import UDPOS
-from torchbenchmark.util.torchtext_legacy.iterator import BucketIterator
-
+from torch_struct.networks import NeuralCFG
+import torch_struct.data
+try:
+  from torchtext.legacy.data import Field
+  from torchtext.legacy.datasets import UDPOS
+except ImportError:
+  from torchtext.data import Field
+  from torchtext.datasets import UDPOS
 from ...util.model import BenchmarkModel
 from torchbenchmark.tasks import OTHER
 
-torch.backends.cudnn.deterministic = False
-torch.backends.cudnn.benchmark = False
-
-def _prefetch(loader, device, limit=10):
-    data = []
-    for _, ex in zip(range(limit), loader):
-        words, lengths = ex.word
-        words = words.long()
-        words = words.to(device).transpose(0, 1)
-        data.append((words, lengths))
-    return data
-
-def TokenBucket(
-    train, batch_size, device, key=lambda x: max(len(x.word[0]), 5)
-):
-    def batch_size_fn(x, _, size):
-        return size + key(x)
-
-    return BucketIterator(
-        train,
-        train=True,
-        sort=False,
-        sort_within_batch=True,
-        shuffle=True,
-        batch_size=batch_size,
-        sort_key=lambda x: key(x),
-        repeat=True,
-        batch_size_fn=batch_size_fn,
-        device=device,
-    )
+torch.manual_seed(1337)
+random.seed(1337)
+np.random.seed(1337)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = True
 
 class Model(BenchmarkModel):
   task = OTHER.OTHER_TASKS
+  def __init__(self, device=None, jit=False):
+    super().__init__()
+    self.device = device
+    self.jit = jit
 
-  # Original train batch size: 200
-  # Source: https://github.com/harvardnlp/pytorch-struct/blob/f4e374e894b94a9411fb3d2dfb44201a18e37b26/notebooks/Unsupervised_CFG.ipynb
-  DEFAULT_TRAIN_BSIZE = 200
-  NUM_OF_BATCHES = 1
-
-  def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
-    super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
-
+    # Download and the load default data.
     WORD = Field(include_lengths=True)
-    UD_TAG = Field(init_token="<bos>", eos_token="<eos>", include_lengths=True)
+    UD_TAG = Field(
+        init_token="<bos>", eos_token="<eos>", include_lengths=True
+    )
 
+    # Download and the load default data.
     train, val, test = UDPOS.splits(
-      fields=(('word', WORD), ('udtag', UD_TAG), (None, None)), 
-      filter_pred=lambda ex: 5 < len(ex.word) < 30
+        fields=(("word", WORD), ("udtag", UD_TAG), (None, None)),
+        filter_pred=lambda ex: 5 < len(ex.word) < 30,
     )
 
     WORD.build_vocab(train.word, min_freq=3)
     UD_TAG.build_vocab(train.udtag)
-    self.iter = TokenBucket(train, batch_size=self.batch_size,
-                            device=self.device)
+    self.train_iter = torch_struct.data.TokenBucket(train, batch_size=100, device=device)
 
-    # Build model
     H = 256
     T = 30
     NT = 30
     self.model = NeuralCFG(len(WORD.vocab), T, NT, H)
+    if jit:
+        self.model = torch.jit.script(self.model)
     self.model.to(device=device)
     self.opt = torch.optim.Adam(self.model.parameters(), lr=0.001, betas=[0.75, 0.999])
-    self.example_inputs = _prefetch(self.iter, self.device)
+    for i, ex in enumerate(self.train_iter):
+      words, lengths = ex.word
+      self.words = words.long().to(device).transpose(0, 1)
+      self.lengths = lengths.to(device)
+      break
 
   def get_module(self):
-    for words, _ in self.example_inputs:
-      return self.model, (words, )
+    for ex in self.train_iter:
+      words, _ = ex.word
+      words = words.long()
+      return self.model, (words.to(device=self.device).transpose(0, 1),)
 
-  def train(self):
-    for _, (words, lengths) in zip(range(self.NUM_OF_BATCHES), self.example_inputs):
+  def train(self, niter=1):
+    for _ in range(niter):
       losses = []
       self.opt.zero_grad()
-      params = self.model(words)
-      dist = SentCFG(params, lengths=lengths)
+      params = self.model(self.words)
+      dist = SentCFG(params, lengths=self.lengths)
       loss = dist.partition.mean()
       (-loss).backward()
       losses.append(loss.detach())
       torch.nn.utils.clip_grad_norm_(self.model.parameters(), 3.0)
       self.opt.step()
 
-  def eval(self):
-    raise NotImplementedError("Eval is not supported by this model")
+  def eval(self, niter=1):
+    for _ in range(niter):
+      params = self.model(self.words)
 
 def cuda_sync(func, sync=False):
     func()
@@ -112,3 +90,17 @@ class TestBench():
   def test_train(self, benchmark, device, jit):
     m = Model(device=device, jit=jit)
     benchmark(cuda_sync, m.train, device=='cuda')
+
+  def test_eval(self, benchmark, device, jit):
+    m = Model(device=device, jit=jit)
+    benchmark(cuda_sync, m.eval, device=='cuda')
+
+if __name__ == '__main__':
+  for device in ['cpu', 'cuda']:
+    for jit in [True, False]:
+      print("Testing device {}, JIT {}".format(device, jit))
+      m = Model(device=device, jit=jit)
+      model, example_inputs = m.get_module()
+      model(*example_inputs)
+      m.train()
+      m.eval()

@@ -6,7 +6,6 @@ import torch
 import os
 import sys
 import torch.nn as nn
-from typing import Tuple
 import torch.nn.functional as F
 from gym import spaces
 
@@ -84,17 +83,10 @@ def make_env(cfg):
 
 class Model(BenchmarkModel):
     task = REINFORCEMENT_LEARNING.OTHER_RL
-    # Batch size is not adjustable in this model
-    DEFAULT_TRAIN_BSIZE = 1
-    DEFAULT_EVAL_BSIZE = 1
-    ALLOW_CUSTOMIZE_BSIZE = False
-    CANNOT_SET_CUSTOM_OPTIMIZER = True
-    # this model will cause infinite loop if deep-copied
-    DEEPCOPY = False
-
-    def __init__(self, test, device, jit=False, batch_size=None, extra_args=[]):
-        super().__init__(test=test, device=device, jit=jit, batch_size=batch_size, extra_args=extra_args)
-
+    def __init__(self, device=None, jit=False):
+        super(Model, self).__init__()
+        self.device = device
+        self.jit = jit
         self.cfg = DRQConfig()
         set_seed_everywhere(self.cfg.seed)
         self.env = make_env(self.cfg)
@@ -117,18 +109,17 @@ class Model(BenchmarkModel):
         obs = obs.unsqueeze(0)
         return self.agent.actor, (obs, )
 
-    def set_module(self, new_model):
-        self.agent.actor = new_model
-
-    def train(self):
+    def train(self, niter=2):
+        if self.jit:
+            raise NotImplementedError()
         episode, episode_reward, episode_step, done = 0, 0, 1, True
-        if True:
+        for step in range(niter):
             obs = self.env.reset()
             done = False
             episode_reward = 0
             episode_step = 0
             episode += 1
-            if self.step < self.cfg.num_seed_steps:
+            if step < self.cfg.num_seed_steps:
                 action = self.env.action_space.sample()
             else:
                 with eval_mode(self.agent):
@@ -149,10 +140,11 @@ class Model(BenchmarkModel):
             episode_step += 1
             self.step += 1
 
-    def eval(self) -> Tuple[torch.Tensor]:
+    def eval(self, niter=1):
+        if self.jit:
+            raise NotImplementedError()
         average_episode_reward = 0
-        steps = 0
-        if True:
+        for episode in range(niter):
             obs = self.env.reset()
             episode_reward = 0
             episode_step = 0
@@ -162,6 +154,4 @@ class Model(BenchmarkModel):
             episode_reward += reward
             episode_step += 1
             average_episode_reward += episode_reward
-            steps += 1
-        average_episode_reward /= float(steps)
-        return (torch.Tensor(action), )
+        average_episode_reward /= float(niter)

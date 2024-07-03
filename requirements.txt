@@ -1,6 +1,4 @@
-accelerate
 bs4
-patch
 py-cpuinfo
 distro
 iopath
@@ -8,16 +6,6 @@ pytest
 pytest-benchmark
 requests
 tabulate
-git+https://github.com/rwightman/pytorch-image-models.git@45af496
-transformers==4.27.4
+timm == 0.4.5
 MonkeyType
 psutil
-pyyaml
-# pytorch build script pins numpy version
-# https://github.com/pytorch/builder/blob/ae5c82e65cb3d8bac6df50e742a195019af91ad3/wheel/build_wheel.sh#L145
-numpy==1.21.2
-# Need https://github.com/kornia/kornia/commit/53808e5 to work on PyTorch nightly
-git+https://github.com/kornia/kornia.git@b7050c3
-scipy # for lazy_bench.py
-submitit
-pynvml
